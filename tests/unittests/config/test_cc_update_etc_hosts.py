@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import shutil
 
 import pytest
@@ -44,8 +45,8 @@ class TestHostsFile(t_help.FilesystemMockingTestCase):
         ds = None
         cc = cloud.Cloud(ds, paths, {}, distro, None)
         self.patchUtils(self.tmp)
-        cc_update_etc_hosts.handle("test", cfg, cc, LOG, [])
-        contents = util.load_file("%s/etc/hosts" % self.tmp)
+        cc_update_etc_hosts.handle("test", cfg, cc, [])
+        contents = util.load_text_file("%s/etc/hosts" % self.tmp)
         if "127.0.1.1\tcloud-init.test.us\tcloud-init" not in contents:
             self.assertIsNone("No entry for 127.0.1.1 in etc/hosts")
         if "192.168.1.1\tblah.blah.us\tblah" not in contents:
@@ -67,8 +68,8 @@ class TestHostsFile(t_help.FilesystemMockingTestCase):
         ds = None
         cc = cloud.Cloud(ds, paths, {}, distro, None)
         self.patchUtils(self.tmp)
-        cc_update_etc_hosts.handle("test", cfg, cc, LOG, [])
-        contents = util.load_file("%s/etc/hosts" % self.tmp)
+        cc_update_etc_hosts.handle("test", cfg, cc, [])
+        contents = util.load_text_file("%s/etc/hosts" % self.tmp)
         if "127.0.1.1 cloud-init.test.us cloud-init" not in contents:
             self.assertIsNone("No entry for 127.0.1.1 in etc/hosts")
         if "::1 cloud-init.test.us cloud-init" not in contents:
@@ -86,10 +87,11 @@ class TestUpdateEtcHosts:
                 {"manage_etc_hosts": "template"},
                 pytest.raises(
                     SchemaValidationError,
-                    match=(
-                        "deprecations: manage_etc_hosts: DEPRECATED. Value"
-                        " ``template`` will be dropped after April 2027."
-                        " Use ``true`` instead"
+                    match=re.escape(
+                        "Cloud config schema deprecations: "
+                        "manage_etc_hosts:  Changed in version 22.3. "
+                        "Use of **template** is deprecated, use "
+                        "``true`` instead."
                     ),
                 ),
             ),
@@ -97,9 +99,9 @@ class TestUpdateEtcHosts:
                 {"manage_etc_hosts": "templatey"},
                 pytest.raises(
                     SchemaValidationError,
-                    match=(
-                        "manage_etc_hosts: 'templatey' is not valid under any"
-                        " of the given schemas"
+                    match=re.escape(
+                        "manage_etc_hosts: 'templatey' is not one of"
+                        " ['template']",
                     ),
                 ),
             ),

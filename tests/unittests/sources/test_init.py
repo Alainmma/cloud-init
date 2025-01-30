@@ -1,4 +1,5 @@
 # This file is part of cloud-init. See LICENSE file for license information.
+# pylint: disable=attribute-defined-outside-init
 
 import copy
 import inspect
@@ -6,6 +7,7 @@ import os
 import stat
 
 from cloudinit import importer, util
+from cloudinit.distros import ubuntu
 from cloudinit.event import EventScope, EventType
 from cloudinit.helpers import Paths
 from cloudinit.sources import (
@@ -73,7 +75,7 @@ class TestDataSource(CiTestCase):
     def setUp(self):
         super(TestDataSource, self).setUp()
         self.sys_cfg = {"datasource": {"_undef": {"key1": False}}}
-        self.distro = "distrotest"  # generally should be a Distro object
+        self.distro = ubuntu.Distro("somedistro", {}, {})
         self.paths = Paths({})
         self.datasource = DataSource(self.sys_cfg, self.distro, self.paths)
 
@@ -201,28 +203,28 @@ class TestDataSource(CiTestCase):
         for log in expected_logs:
             self.assertIn(log, logs)
 
-    @mock.patch("cloudinit.sources.net.find_fallback_nic")
+    @mock.patch("cloudinit.distros.net.find_fallback_nic")
     def test_fallback_interface_is_discovered(self, m_get_fallback_nic):
         """The fallback_interface is discovered via find_fallback_nic."""
         m_get_fallback_nic.return_value = "nic9"
-        self.assertEqual("nic9", self.datasource.fallback_interface)
+        self.assertEqual("nic9", self.datasource.distro.fallback_interface)
 
     @mock.patch("cloudinit.sources.net.find_fallback_nic")
     def test_fallback_interface_logs_undiscovered(self, m_get_fallback_nic):
         """Log a warning when fallback_interface can not discover the nic."""
-        self.datasource._cloud_name = "MySupahCloud"
         m_get_fallback_nic.return_value = None  # Couldn't discover nic
-        self.assertIsNone(self.datasource.fallback_interface)
+        self.assertIsNone(self.datasource.distro.fallback_interface)
         self.assertEqual(
-            "WARNING: Did not find a fallback interface on MySupahCloud.\n",
+            "WARNING: Did not find a fallback interface on distro: "
+            "somedistro.\n",
             self.logs.getvalue(),
         )
 
     @mock.patch("cloudinit.sources.net.find_fallback_nic")
     def test_wb_fallback_interface_is_cached(self, m_get_fallback_nic):
         """The fallback_interface is cached and won't be rediscovered."""
-        self.datasource._fallback_interface = "nic10"
-        self.assertEqual("nic10", self.datasource.fallback_interface)
+        self.datasource.distro.fallback_interface = "nic10"
+        self.assertEqual("nic10", self.datasource.distro.fallback_interface)
         m_get_fallback_nic.assert_not_called()
 
     def test__get_data_unimplemented(self):
@@ -395,11 +397,12 @@ class TestDataSource(CiTestCase):
             ):
                 datasource.get_data()
         json_file = Paths({"run_dir": tmp}).get_runpath("instance_data")
-        content = util.load_file(json_file)
+        content = util.load_text_file(json_file)
         expected = {
             "base64_encoded_keys": [],
             "merged_cfg": REDACT_SENSITIVE_VALUE,
-            "sensitive_keys": ["merged_cfg"],
+            "merged_system_cfg": REDACT_SENSITIVE_VALUE,
+            "sensitive_keys": ["merged_cfg", "merged_system_cfg"],
             "sys_info": sys_info,
             "v1": {
                 "_beta_keys": ["subplatform"],
@@ -458,12 +461,26 @@ class TestDataSource(CiTestCase):
                         "cred2": "othersekret",
                     }
                 },
+                "someother": {
+                    "nested": {
+                        "userData": "HIDE ME",
+                    }
+                },
+                "VENDOR-DAta": "HIDE ME TOO",
             },
         )
         self.assertCountEqual(
             (
+                "combined_cloud_config",
                 "merged_cfg",
+                "merged_system_cfg",
                 "security-credentials",
+                "userdata",
+                "user-data",
+                "user_data",
+                "vendordata",
+                "vendor-data",
+                "ds/vendor_data",
             ),
             datasource.sensitive_metadata_keys,
         )
@@ -485,13 +502,17 @@ class TestDataSource(CiTestCase):
         with mock.patch("cloudinit.util.system_info", return_value=sys_info):
             datasource.get_data()
         json_file = Paths({"run_dir": tmp}).get_runpath("instance_data")
-        redacted = util.load_json(util.load_file(json_file))
+        redacted = util.load_json(util.load_text_file(json_file))
         expected = {
             "base64_encoded_keys": [],
             "merged_cfg": REDACT_SENSITIVE_VALUE,
+            "merged_system_cfg": REDACT_SENSITIVE_VALUE,
             "sensitive_keys": [
+                "ds/meta_data/VENDOR-DAta",
                 "ds/meta_data/some/security-credentials",
+                "ds/meta_data/someother/nested/userData",
                 "merged_cfg",
+                "merged_system_cfg",
             ],
             "sys_info": sys_info,
             "v1": {
@@ -500,6 +521,7 @@ class TestDataSource(CiTestCase):
                 "availability_zone": "myaz",
                 "cloud-name": "subclasscloudname",
                 "cloud_name": "subclasscloudname",
+                "cloud_id": "subclasscloudname",
                 "distro": "ubuntu",
                 "distro_release": "focal",
                 "distro_version": "20.04",
@@ -522,14 +544,18 @@ class TestDataSource(CiTestCase):
             "ds": {
                 "_doc": EXPERIMENTAL_TEXT,
                 "meta_data": {
+                    "VENDOR-DAta": REDACT_SENSITIVE_VALUE,
                     "availability_zone": "myaz",
                     "local-hostname": "test-subclass-hostname",
                     "region": "myregion",
                     "some": {"security-credentials": REDACT_SENSITIVE_VALUE},
+                    "someother": {
+                        "nested": {"userData": REDACT_SENSITIVE_VALUE}
+                    },
                 },
             },
         }
-        self.assertCountEqual(expected, redacted)
+        self.assertEqual(expected, redacted)
         file_stat = os.stat(json_file)
         self.assertEqual(0o644, stat.S_IMODE(file_stat.st_mode))
 
@@ -572,8 +598,16 @@ class TestDataSource(CiTestCase):
 
         self.assertCountEqual(
             (
+                "combined_cloud_config",
                 "merged_cfg",
+                "merged_system_cfg",
                 "security-credentials",
+                "userdata",
+                "user-data",
+                "user_data",
+                "vendordata",
+                "vendor-data",
+                "ds/vendor_data",
             ),
             datasource.sensitive_metadata_keys,
         )
@@ -586,10 +620,17 @@ class TestDataSource(CiTestCase):
         sensitive_json_file = Paths({"run_dir": tmp}).get_runpath(
             "instance_data_sensitive"
         )
-        content = util.load_file(sensitive_json_file)
+        content = util.load_text_file(sensitive_json_file)
         expected = {
             "base64_encoded_keys": [],
             "merged_cfg": {
+                "_doc": (
+                    "DEPRECATED: Use merged_system_cfg. Will be dropped "
+                    "from 24.1"
+                ),
+                "datasource": {"_undef": {"key1": False}},
+            },
+            "merged_system_cfg": {
                 "_doc": (
                     "Merged cloud-init system config from "
                     "/etc/cloud/cloud.cfg and /etc/cloud/cloud.cfg.d/"
@@ -599,6 +640,7 @@ class TestDataSource(CiTestCase):
             "sensitive_keys": [
                 "ds/meta_data/some/security-credentials",
                 "merged_cfg",
+                "merged_system_cfg",
             ],
             "sys_info": sys_info,
             "v1": {
@@ -659,7 +701,7 @@ class TestDataSource(CiTestCase):
         )
         datasource.get_data()
         json_file = paths.get_runpath("instance_data")
-        content = util.load_file(json_file)
+        content = util.load_text_file(json_file)
         expected_metadata = {
             "key1": "val1",
             "key2": {
@@ -686,11 +728,11 @@ class TestDataSource(CiTestCase):
         datasource.ec2_metadata = UNSET
         datasource.get_data()
         json_file = paths.get_runpath("instance_data")
-        instance_data = util.load_json(util.load_file(json_file))
+        instance_data = util.load_json(util.load_text_file(json_file))
         self.assertNotIn("ec2_metadata", instance_data["ds"])
         datasource.ec2_metadata = {"ec2stuff": "is good"}
         datasource.persist_instance_data()
-        instance_data = util.load_json(util.load_file(json_file))
+        instance_data = util.load_json(util.load_text_file(json_file))
         self.assertEqual(
             {"ec2stuff": "is good"}, instance_data["ds"]["ec2_metadata"]
         )
@@ -716,20 +758,24 @@ class TestDataSource(CiTestCase):
             "cloudinit.sources.canonical_cloud_id", return_value="my-cloud"
         ):
             datasource.get_data()
-        self.assertEqual("my-cloud\n", util.load_file(cloud_id_link))
-        # A symlink with the generic /run/cloud-init/cloud-id link is present
-        self.assertTrue(util.is_link(cloud_id_link))
+            self.assertEqual("my-cloud\n", util.load_text_file(cloud_id_link))
+            # A symlink with the generic /run/cloud-init/cloud-id
+            # link is present
+            self.assertTrue(util.is_link(cloud_id_link))
+            datasource.persist_instance_data()
+            # cloud-id<cloud-type> not deleted: no cloud-id change
+            self.assertTrue(os.path.exists(cloud_id_file))
         # When cloud-id changes, symlink and content change
         with mock.patch(
             "cloudinit.sources.canonical_cloud_id", return_value="my-cloud2"
         ):
             datasource.persist_instance_data()
-        self.assertEqual("my-cloud2\n", util.load_file(cloud_id2_file))
+        self.assertEqual("my-cloud2\n", util.load_text_file(cloud_id2_file))
         # Previous cloud-id-<cloud-type> file removed
         self.assertFalse(os.path.exists(cloud_id_file))
         # Generic link persisted which contains canonical-cloud-id as content
         self.assertTrue(util.is_link(cloud_id_link))
-        self.assertEqual("my-cloud2\n", util.load_file(cloud_id_link))
+        self.assertEqual("my-cloud2\n", util.load_text_file(cloud_id_link))
 
     def test_persist_instance_data_writes_network_json_when_set(self):
         """When network_data.json class attribute is set, persist to json."""
@@ -744,11 +790,11 @@ class TestDataSource(CiTestCase):
         )
         datasource.get_data()
         json_file = paths.get_runpath("instance_data")
-        instance_data = util.load_json(util.load_file(json_file))
+        instance_data = util.load_json(util.load_text_file(json_file))
         self.assertNotIn("network_json", instance_data["ds"])
         datasource.network_json = {"network_json": "is good"}
         datasource.persist_instance_data()
-        instance_data = util.load_json(util.load_file(json_file))
+        instance_data = util.load_json(util.load_text_file(json_file))
         self.assertEqual(
             {"network_json": "is good"}, instance_data["ds"]["network_json"]
         )
@@ -793,7 +839,7 @@ class TestDataSource(CiTestCase):
         )
         self.assertTrue(datasource.get_data())
         json_file = paths.get_runpath("instance_data")
-        content = util.load_file(json_file)
+        content = util.load_text_file(json_file)
         instance_json = util.load_json(content)
         self.assertCountEqual(
             ["ds/meta_data/key2/key2.1"], instance_json["base64_encoded_keys"]
@@ -859,9 +905,8 @@ class TestDataSource(CiTestCase):
     def test_clear_cached_attrs_skips_non_attr_class_attributes(self):
         """Skip any cached_attr_defaults which aren't class attributes."""
         self.datasource._dirty_cache = True
-        self.datasource.clear_cached_attrs()
-        for attr in ("ec2_metadata", "network_json"):
-            self.assertFalse(hasattr(self.datasource, attr))
+        self.datasource.clear_cached_attrs(attr_defaults=(("some", "value"),))
+        self.assertFalse(hasattr(self.datasource, "some"))
 
     def test_clear_cached_attrs_of_custom_attrs(self):
         """Custom attr_values can be passed to clear_cached_attrs."""
@@ -890,15 +935,14 @@ class TestDataSource(CiTestCase):
             self.datasource.default_update_events,
         )
 
-        def fake_get_data():
-            raise Exception("get_data should not be called")
-
+        fake_get_data = mock.Mock()
         self.datasource.get_data = fake_get_data
         self.assertFalse(
             self.datasource.update_metadata_if_supported(
                 source_event_types=[EventType.BOOT]
             )
         )
+        self.assertEqual([], fake_get_data.call_args_list)
 
     @mock.patch.dict(
         DataSource.supported_update_events,
@@ -1048,6 +1092,3 @@ class TestCanonicalCloudID(CiTestCase):
                 cloud_name="azure", region="!chinaeast", platform="platform"
             ),
         )
-
-
-# vi: ts=4 expandtab

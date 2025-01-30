@@ -9,14 +9,15 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-from cloudinit import log as logging
-from cloudinit import type_utils, util
+import logging
+
+from cloudinit import lifecycle, type_utils, util
 
 LOG = logging.getLogger(__name__)
 
 
 # Normalizes an input group configuration which can be:
-# Comma seperated string or a list or a dictionary
+# Comma separated string or a list or a dictionary
 #
 # Returns dictionary of group names => members of that group which is the
 # standard form used in the rest of cloud-init
@@ -174,9 +175,10 @@ def normalize_users_groups(cfg, distro):
         # Translate it into a format that will be more useful going forward
         if isinstance(old_user, str):
             old_user = {"name": old_user}
-            LOG.warning(
-                "DEPRECATED: 'user' of type string is deprecated and will"
-                " be removed in a future release. Use 'users' list instead."
+            lifecycle.deprecate(
+                deprecated="'user' of type string",
+                deprecated_version="22.2",
+                extra_message="Use 'users' list instead.",
             )
         elif not isinstance(old_user, dict):
             LOG.warning(
@@ -206,10 +208,10 @@ def normalize_users_groups(cfg, distro):
 
     base_users = cfg.get("users", [])
     if isinstance(base_users, (dict, str)):
-        LOG.warning(
-            "DEPRECATED: 'users' of type %s is deprecated and will be removed"
-            " in a future release. Use 'users' as a list.",
-            type(base_users),
+        lifecycle.deprecate(
+            deprecated=f"'users' of type {type(base_users)}",
+            deprecated_version="22.2",
+            extra_message="Use 'users' as a list.",
         )
     elif not isinstance(base_users, (list)):
         LOG.warning(
@@ -256,6 +258,3 @@ def extract_default(users, default_name=None, default_config=None):
     config = tmp_users[name]
     config.pop("default", None)
     return (name, config)
-
-
-# vi: ts=4 expandtab

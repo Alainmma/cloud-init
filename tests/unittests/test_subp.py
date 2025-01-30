@@ -9,14 +9,14 @@ import sys
 from unittest import mock
 
 from cloudinit import subp, util
-from tests.unittests.helpers import CiTestCase, get_top_level_dir
+from tests.helpers import get_top_level_dir
+from tests.unittests.helpers import CiTestCase
 
-BASH = subp.which("bash")
+SH = "sh"
 BOGUS_COMMAND = "this-is-not-expected-to-be-a-program-name"
 
 
 class TestPrependBaseCommands(CiTestCase):
-
     with_logs = True
 
     def test_prepend_base_command_errors_on_neither_string_nor_list(self):
@@ -93,24 +93,24 @@ class TestPrependBaseCommands(CiTestCase):
 
 class TestSubp(CiTestCase):
     allowed_subp = [
-        BASH,
+        SH,
         "cat",
         CiTestCase.SUBP_SHELL_TRUE,
         BOGUS_COMMAND,
         sys.executable,
+        "env",
     ]
 
-    stdin2err = [BASH, "-c", "cat >&2"]
+    stdin2err = [SH, "-c", "cat >&2"]
     stdin2out = ["cat"]
     utf8_invalid = b"ab\xaadef"
     utf8_valid = b"start \xc3\xa9 end"
     utf8_valid_2 = b"d\xc3\xa9j\xc8\xa7"
-    printenv = [BASH, "-c", 'for n in "$@"; do echo "$n=${!n}"; done', "--"]
 
-    def printf_cmd(self, *args):
-        # bash's printf supports \xaa.  So does /usr/bin/printf
-        # but by using bash, we remove dependency on another program.
-        return [BASH, "-c", 'printf "$@"', "printf"] + list(args)
+    @staticmethod
+    def printf_cmd(arg):
+        """print with builtin printf"""
+        return [SH, "-c", 'printf "$@"', "printf", arg]
 
     def test_subp_handles_bytestrings(self):
         """subp can run a bytestring command if shell is True."""
@@ -119,7 +119,7 @@ class TestSubp(CiTestCase):
         (out, _err) = subp.subp(cmd.encode("utf-8"), shell=True)
         self.assertEqual("", out)
         self.assertEqual("", _err)
-        self.assertEqual("HI MOM\n", util.load_file(tmp_file))
+        self.assertEqual("HI MOM\n", util.load_text_file(tmp_file))
 
     def test_subp_handles_strings(self):
         """subp can run a string command if shell is True."""
@@ -128,7 +128,7 @@ class TestSubp(CiTestCase):
         (out, _err) = subp.subp(cmd, shell=True)
         self.assertEqual("", out)
         self.assertEqual("", _err)
-        self.assertEqual("HI MOM\n", util.load_file(tmp_file))
+        self.assertEqual("HI MOM\n", util.load_text_file(tmp_file))
 
     def test_subp_handles_utf8(self):
         # The given bytes contain utf-8 accented characters as seen in e.g.
@@ -146,11 +146,21 @@ class TestSubp(CiTestCase):
         self.assertEqual(out, self.utf8_valid)
 
     def test_subp_decode_ignore(self):
+        """ensure that invalid utf-8 is ignored with the "ignore" kwarg"""
         # this executes a string that writes invalid utf-8 to stdout
-        (out, _err) = subp.subp(
-            self.printf_cmd("abc\\xaadef"), capture=True, decode="ignore"
-        )
-        self.assertEqual(out, "abcdef")
+        with mock.patch.object(
+            subp.subprocess,
+            "Popen",
+            autospec=True,
+        ) as sp:
+            sp.return_value.communicate = mock.Mock(
+                return_value=(b"abc\xaadef", None)
+            )
+            sp.return_value.returncode = 0
+            assert (
+                "abcdef"
+                == subp.subp([SH], capture=True, decode="ignore").stdout
+            )
 
     def test_subp_decode_strict_valid_utf8(self):
         (out, _err) = subp.subp(
@@ -189,31 +199,22 @@ class TestSubp(CiTestCase):
 
     def test_subp_reads_env(self):
         with mock.patch.dict("os.environ", values={"FOO": "BAR"}):
-            out, _err = subp.subp(self.printenv + ["FOO"], capture=True)
-        self.assertEqual("FOO=BAR", out.splitlines()[0])
-
-    def test_subp_env_and_update_env(self):
-        out, _err = subp.subp(
-            self.printenv + ["FOO", "HOME", "K1", "K2"],
-            capture=True,
-            env={"FOO": "BAR"},
-            update_env={"HOME": "/myhome", "K2": "V2"},
-        )
-        self.assertEqual(
-            ["FOO=BAR", "HOME=/myhome", "K1=", "K2=V2"], out.splitlines()
-        )
+            assert {"FOO=BAR"}.issubset(
+                subp.subp("env", capture=True).stdout.splitlines()
+            )
 
     def test_subp_update_env(self):
+        """test that subp's update_env argument updates the environment"""
         extra = {"FOO": "BAR", "HOME": "/root", "K1": "V1"}
         with mock.patch.dict("os.environ", values=extra):
             out, _err = subp.subp(
-                self.printenv + ["FOO", "HOME", "K1", "K2"],
+                "env",
                 capture=True,
                 update_env={"HOME": "/myhome", "K2": "V2"},
             )
 
-        self.assertEqual(
-            ["FOO=BAR", "HOME=/myhome", "K1=V1", "K2=V2"], out.splitlines()
+        assert {"FOO=BAR", "HOME=/myhome", "K1=V1", "K2=V2"}.issubset(
+            set(out.splitlines())
         )
 
     def test_subp_warn_missing_shebang(self):
@@ -230,19 +231,6 @@ class TestSubp(CiTestCase):
                 subp.subp,
                 (noshebang,),
             )
-
-    def test_subp_combined_stderr_stdout(self):
-        """Providing combine_capture as True redirects stderr to stdout."""
-        data = b"hello world"
-        (out, err) = subp.subp(
-            self.stdin2err,
-            capture=True,
-            combine_capture=True,
-            decode=False,
-            data=data,
-        )
-        self.assertEqual(b"", err)
-        self.assertEqual(data, out)
 
     def test_returns_none_if_no_capture(self):
         (out, err) = subp.subp(self.stdin2out, data=b"", capture=False)
@@ -262,6 +250,14 @@ class TestSubp(CiTestCase):
             subp.subp([BOGUS_COMMAND], decode=True)
         self.assertTrue(isinstance(cm.exception.stdout, str))
         self.assertTrue(isinstance(cm.exception.stderr, str))
+
+    def test_exception_invalid_command(self):
+        args = [None, "first", "arg", "missing"]
+        with self.assertRaises(
+            subp.ProcessExecutionError, msg="Running invalid command"
+        ):
+            with self.allow_subp(args):
+                subp.subp(args)
 
     def test_bunch_of_slashes_in_path(self):
         self.assertEqual(
@@ -298,7 +294,7 @@ class TestSubp(CiTestCase):
             ]
         )
         cmd = [
-            BASH,
+            SH,
             "-c",
             'echo -n "$@"',
             "--",
@@ -313,41 +309,3 @@ class TestSubp(CiTestCase):
             decode=False,
         )
         self.assertEqual(self.utf8_valid, out)
-
-    def test_bogus_command_logs_status_messages(self):
-        """status_cb gets status messages logs on bogus commands provided."""
-        logs = []
-
-        def status_cb(log):
-            logs.append(log)
-
-        with self.assertRaises(subp.ProcessExecutionError):
-            subp.subp([BOGUS_COMMAND], status_cb=status_cb)
-
-        expected = [
-            "Begin run command: {cmd}\n".format(cmd=BOGUS_COMMAND),
-            "ERROR: End run command: invalid command provided\n",
-        ]
-        self.assertEqual(expected, logs)
-
-    def test_command_logs_exit_codes_to_status_cb(self):
-        """status_cb gets status messages containing command exit code."""
-        logs = []
-
-        def status_cb(log):
-            logs.append(log)
-
-        with self.assertRaises(subp.ProcessExecutionError):
-            subp.subp([BASH, "-c", "exit 2"], status_cb=status_cb)
-        subp.subp([BASH, "-c", "exit 0"], status_cb=status_cb)
-
-        expected = [
-            "Begin run command: %s -c exit 2\n" % BASH,
-            "ERROR: End run command: exit(2)\n",
-            "Begin run command: %s -c exit 0\n" % BASH,
-            "End run command: exit(0)\n",
-        ]
-        self.assertEqual(expected, logs)
-
-
-# vi: ts=4 expandtab

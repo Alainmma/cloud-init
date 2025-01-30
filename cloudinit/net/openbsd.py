@@ -1,16 +1,16 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 import platform
 
 import cloudinit.net.bsd
-from cloudinit import log as logging
-from cloudinit import subp, util
+from cloudinit import net, subp, util
 
 LOG = logging.getLogger(__name__)
 
 
 class Renderer(cloudinit.net.bsd.BSDRenderer):
-    def write_config(self):
+    def write_config(self, target=None):
         for device_name, v in self.interface_configurations.items():
             if_file = "etc/hostname.{}".format(device_name)
             fn = subp.target_path(self.target, if_file)
@@ -27,8 +27,8 @@ class Renderer(cloudinit.net.bsd.BSDRenderer):
                     )
                 mtu = v.get("mtu")
                 if mtu:
-                    content += " mtu %d" % mtu
-                content += "\n"
+                    content += "\nmtu %d" % mtu
+                content += "\n" + self.interface_routes
             util.write_file(fn, content)
 
     def start_services(self, run=False):
@@ -43,7 +43,7 @@ class Renderer(cloudinit.net.bsd.BSDRenderer):
                     ["dhcpleasectl", "-w", "30", interface], capture=True
                 )
         else:
-            subp.subp(["pkill", "dhclient"], capture=True, rcs=[0, 1])
+            net.dhcp.IscDhclient.kill_dhcp_client()
             subp.subp(["route", "del", "default"], capture=True, rcs=[0, 1])
             subp.subp(["route", "flush", "default"], capture=True, rcs=[0, 1])
             subp.subp(["sh", "/etc/netstart"], capture=True)
@@ -54,6 +54,17 @@ class Renderer(cloudinit.net.bsd.BSDRenderer):
             fn = subp.target_path(self.target, if_file)
             content = gateway + "\n"
             util.write_file(fn, content)
+        else:
+            self.interface_routes = (
+                self.interface_routes
+                + "!route add "
+                + network
+                + " -netmask "
+                + netmask
+                + " "
+                + gateway
+                + "\n"
+            )
 
 
 def available(target=None):

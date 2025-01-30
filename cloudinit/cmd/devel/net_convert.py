@@ -4,12 +4,14 @@
 """Debug network config format conversions."""
 import argparse
 import json
+import logging
 import os
 import sys
 
 import yaml
 
-from cloudinit import distros, log, safeyaml
+from cloudinit import distros, safeyaml
+from cloudinit.log import loggers
 from cloudinit.net import (
     eni,
     netplan,
@@ -99,9 +101,9 @@ def handle_args(name, args):
         os.makedirs(args.directory)
 
     if args.debug:
-        log.setupBasicLogging(level=log.DEBUG)
+        loggers.setup_basic_logging(level=logging.DEBUG)
     else:
-        log.setupBasicLogging(level=log.WARN)
+        loggers.setup_basic_logging(level=logging.WARN)
     if args.mac:
         known_macs = {}
         for item in args.mac:
@@ -114,7 +116,7 @@ def handle_args(name, args):
     if args.kind == "eni":
         pre_ns = eni.convert_eni_data(net_data)
     elif args.kind == "yaml":
-        pre_ns = safeyaml.load(net_data)
+        pre_ns = yaml.safe_load(net_data)
         if "network" in pre_ns:
             pre_ns = pre_ns.get("network")
         if args.debug:
@@ -127,7 +129,8 @@ def handle_args(name, args):
         )
     elif args.kind == "azure-imds":
         pre_ns = azure.generate_network_config_from_instance_network_metadata(
-            json.loads(net_data)["network"]
+            json.loads(net_data)["network"],
+            apply_network_config_for_secondary_ips=True,
         )
     elif args.kind == "vmware-imc":
         config = guestcust_util.Config(

@@ -7,15 +7,14 @@
 """NTP: enable and configure ntp"""
 
 import copy
+import logging
 import os
-from logging import Logger
-from textwrap import dedent
+from typing import Dict, Mapping
 
-from cloudinit import log as logging
 from cloudinit import subp, temp_utils, templater, type_utils, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
@@ -26,6 +25,8 @@ NR_POOL_SERVERS = 4
 distros = [
     "almalinux",
     "alpine",
+    "aosc",
+    "azurelinux",
     "centos",
     "cloudlinux",
     "cos",
@@ -36,13 +37,20 @@ distros = [
     "mariner",
     "miraclelinux",
     "openbsd",
-    "openEuler",
+    "openeuler",
+    "OpenCloudOS",
     "openmandriva",
     "opensuse",
+    "opensuse-microos",
+    "opensuse-tumbleweed",
+    "opensuse-leap",
     "photon",
     "rhel",
     "rocky",
+    "sle_hpc",
+    "sle-micro",
     "sles",
+    "TencentOS",
     "ubuntu",
     "virtuozzo",
 ]
@@ -91,7 +99,7 @@ NTP_CLIENT_CONFIG = {
 }
 
 # This is Distro-specific configuration overrides of the base config
-DISTRO_CLIENT_CONFIG = {
+DISTRO_CLIENT_CONFIG: Dict[str, Dict] = {
     "alpine": {
         "chrony": {
             "confpath": "/etc/chrony/chrony.conf",
@@ -101,6 +109,21 @@ DISTRO_CLIENT_CONFIG = {
             "confpath": "/etc/ntp.conf",
             "packages": [],
             "service_name": "ntpd",
+        },
+    },
+    "aosc": {
+        "systemd-timesyncd": {
+            "check_exe": "/usr/lib/systemd/systemd-timesyncd",
+            "confpath": "/etc/systemd/timesyncd.conf",
+        },
+    },
+    "azurelinux": {
+        "chrony": {
+            "service_name": "chronyd",
+        },
+        "systemd-timesyncd": {
+            "check_exe": "/usr/lib/systemd/systemd-timesyncd",
+            "confpath": "/etc/systemd/timesyncd.conf",
         },
     },
     "centos": {
@@ -215,6 +238,14 @@ DISTRO_CLIENT_CONFIG = {
     },
 }
 
+for distro in ("opensuse-microos", "opensuse-tumbleweed", "opensuse-leap"):
+    DISTRO_CLIENT_CONFIG[distro] = DISTRO_CLIENT_CONFIG["opensuse"]
+
+for distro in ("almalinux", "cloudlinux", "rocky"):
+    DISTRO_CLIENT_CONFIG[distro] = DISTRO_CLIENT_CONFIG["rhel"]
+
+for distro in ("sle_hpc", "sle-micro"):
+    DISTRO_CLIENT_CONFIG[distro] = DISTRO_CLIENT_CONFIG["sles"]
 
 # The schema definition for each cloud-config module is a strict contract for
 # describing supported configuration parameters for each cloud-config section.
@@ -224,64 +255,10 @@ DISTRO_CLIENT_CONFIG = {
 
 meta: MetaSchema = {
     "id": "cc_ntp",
-    "name": "NTP",
-    "title": "enable and configure ntp",
-    "description": dedent(
-        """\
-        Handle ntp configuration. If ntp is not installed on the system and
-        ntp configuration is specified, ntp will be installed. If there is a
-        default ntp config file in the image or one is present in the
-        distro's ntp package, it will be copied to a file with ``.dist``
-        appended to the filename before any changes are made. A list of ntp
-        pools and ntp servers can be provided under the ``ntp`` config key.
-        If no ntp ``servers`` or ``pools`` are provided, 4 pools will be used
-        in the format ``{0-3}.{distro}.pool.ntp.org``."""
-    ),
     "distros": distros,
-    "examples": [
-        dedent(
-            """\
-        # Override ntp with chrony configuration on Ubuntu
-        ntp:
-          enabled: true
-          ntp_client: chrony  # Uses cloud-init default chrony configuration
-        """
-        ),
-        dedent(
-            """\
-        # Provide a custom ntp client configuration
-        ntp:
-          enabled: true
-          ntp_client: myntpclient
-          config:
-             confpath: /etc/myntpclient/myntpclient.conf
-             check_exe: myntpclientd
-             packages:
-               - myntpclient
-             service_name: myntpclient
-             template: |
-                 ## template:jinja
-                 # My NTP Client config
-                 {% if pools -%}# pools{% endif %}
-                 {% for pool in pools -%}
-                 pool {{pool}} iburst
-                 {% endfor %}
-                 {%- if servers %}# servers
-                 {% endif %}
-                 {% for server in servers -%}
-                 server {{server}} iburst
-                 {% endfor %}
-          pools: [0.int.pool.ntp.org, 1.int.pool.ntp.org, ntp.myorg.org]
-          servers:
-            - ntp.server.local
-            - ntp.ubuntu.com
-            - 192.168.23.2"""
-        ),
-    ],
     "frequency": PER_INSTANCE,
     "activate_by_schema_keys": ["ntp"],
 }
-__doc__ = get_meta_doc(meta)
 
 
 REQUIRED_NTP_CONFIG_KEYS = frozenset(
@@ -303,7 +280,7 @@ def distro_ntp_client_configs(distro):
     return cfg
 
 
-def select_ntp_client(ntp_client, distro):
+def select_ntp_client(ntp_client, distro) -> Mapping:
     """Determine which ntp client is to be used, consulting the distro
        for its preference.
 
@@ -342,7 +319,7 @@ def select_ntp_client(ntp_client, distro):
                 'Selected distro preferred NTP client "%s", not yet installed',
                 client,
             )
-            clientcfg = distro_cfg.get(client)
+            clientcfg = distro_cfg.get(client, {})
     else:
         LOG.debug(
             'Selected NTP client "%s" via distro system config',
@@ -399,7 +376,7 @@ def generate_server_names(distro):
         # so use general x.pool.ntp.org instead. The same applies to EuroLinux
         pool_distro = ""
 
-    for x in range(0, NR_POOL_SERVERS):
+    for x in range(NR_POOL_SERVERS):
         names.append(
             ".".join(
                 [n for n in [str(x)] + [pool_distro] + ["pool.ntp.org"] if n]
@@ -414,6 +391,8 @@ def write_ntp_config_template(
     service_name=None,
     servers=None,
     pools=None,
+    allow=None,
+    peers=None,
     path=None,
     template_fn=None,
     template=None,
@@ -426,6 +405,10 @@ def write_ntp_config_template(
     list.
     @param pools: A list of strings specifying ntp pools. Defaults to empty
     list.
+    @param allow: A list of strings specifying a network/CIDR. Defaults to
+    empty list.
+    @param peers: A list nodes that should peer with each other. Defaults to
+    empty list.
     @param path: A string to specify where to write the rendered template.
     @param template_fn: A string to specify the template source file.
     @param template: A string specifying the contents of the template. This
@@ -439,6 +422,10 @@ def write_ntp_config_template(
         servers = []
     if not pools:
         pools = []
+    if not allow:
+        allow = []
+    if not peers:
+        peers = []
 
     if len(servers) == 0 and len(pools) == 0 and distro_name == "cos":
         return
@@ -463,7 +450,12 @@ def write_ntp_config_template(
     if not template_fn and not template:
         raise ValueError("Not template_fn or template provided")
 
-    params = {"servers": servers, "pools": pools}
+    params = {
+        "servers": servers,
+        "pools": pools,
+        "allow": allow,
+        "peers": peers,
+    }
     if template:
         tfile = temp_utils.mkstemp(prefix="template_name-", suffix=".tmpl")
         template_fn = tfile[1]  # filepath is second item in tuple
@@ -536,9 +528,7 @@ def supplemental_schema_validation(ntp_config):
         )
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     """Enable and configure ntp."""
     if "ntp" not in cfg:
         LOG.debug(
@@ -576,7 +566,7 @@ def handle(
 
     template_fn = None
     if not ntp_client_config.get("template"):
-        template_name = ntp_client_config.get("template_name").replace(
+        template_name = ntp_client_config["template_name"].replace(
             "{distro}", cloud.distro.name
         )
         template_fn = cloud.get_template_filename(template_name)
@@ -587,11 +577,18 @@ def handle(
             )
             raise RuntimeError(msg)
 
+    LOG.debug("service_name: %s", ntp_client_config.get("service_name"))
+    LOG.debug("servers: %s", ntp_cfg.get("servers", []))
+    LOG.debug("pools: %s", ntp_cfg.get("pools", []))
+    LOG.debug("allow: %s", ntp_cfg.get("allow", []))
+    LOG.debug("peers: %s", ntp_cfg.get("peers", []))
     write_ntp_config_template(
         cloud.distro.name,
         service_name=ntp_client_config.get("service_name"),
         servers=ntp_cfg.get("servers", []),
         pools=ntp_cfg.get("pools", []),
+        allow=ntp_cfg.get("allow", []),
+        peers=ntp_cfg.get("peers", []),
         path=ntp_client_config.get("confpath"),
         template_fn=template_fn,
         template=ntp_client_config.get("template"),
@@ -615,18 +612,15 @@ def handle(
 
         try:
             cloud.distro.manage_service(
-                "enable", ntp_client_config.get("service_name")
+                "enable", ntp_client_config["service_name"]
             )
         except subp.ProcessExecutionError as e:
             LOG.exception("Failed to enable ntp service: %s", e)
             raise
     try:
         cloud.distro.manage_service(
-            "reload", ntp_client_config.get("service_name")
+            "reload", ntp_client_config["service_name"]
         )
     except subp.ProcessExecutionError as e:
         LOG.exception("Failed to reload/start ntp service: %s", e)
         raise
-
-
-# vi: ts=4 expandtab

@@ -3,15 +3,19 @@
 Verify that if cloud-init is using DataSourceRbxCloud, there is
 no traceback if the metadata disk cannot be found.
 """
+
 import pytest
 
 from tests.integration_tests.instances import IntegrationInstance
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.util import verify_clean_boot, verify_clean_log
 
 
 # With some datasource hacking, we can run this on a NoCloud instance
-@pytest.mark.lxd_container
-@pytest.mark.lxd_vm
+@pytest.mark.skipif(
+    PLATFORM not in ["lxd_container", "lxd_vm"],
+    reason="Tested behavior is emulated using NoCloud",
+)
 def test_datasource_rbx_no_stacktrace(client: IntegrationInstance):
     client.write_to_file(
         "/etc/cloud/cloud.cfg.d/90_dpkg.cfg",
@@ -26,6 +30,7 @@ def test_datasource_rbx_no_stacktrace(client: IntegrationInstance):
 
     log = client.read_from_file("/var/log/cloud-init.log")
     verify_clean_log(log)
+    verify_clean_boot(client)
     assert "Failed to load metadata and userdata" not in log
     assert (
         "Getting data from <class 'cloudinit.sources.DataSourceRbxCloud."

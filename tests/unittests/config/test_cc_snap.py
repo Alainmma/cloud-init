@@ -2,8 +2,6 @@
 
 import logging
 import os
-import re
-from io import StringIO
 
 import pytest
 
@@ -14,7 +12,12 @@ from cloudinit.config.schema import (
     get_schema,
     validate_cloudconfig_schema,
 )
-from tests.unittests.helpers import CiTestCase, mock, skipUnlessJsonSchema
+from tests.unittests.helpers import (
+    SCHEMA_EMPTY_ERROR,
+    CiTestCase,
+    mock,
+    skipUnlessJsonSchema,
+)
 from tests.unittests.util import get_cloud
 
 M_PATH = "cloudinit.config.cc_snap."
@@ -133,7 +136,9 @@ class TestAddAssertions:
         ] == m_subp.call_args_list
         compare_file = tmpdir.join("comparison")
         util.write_file(compare_file, "\n".join(assertions).encode("utf-8"))
-        assert util.load_file(compare_file) == util.load_file(assert_file)
+        assert util.load_text_file(compare_file) == util.load_text_file(
+            assert_file
+        )
 
     @mock.patch("cloudinit.config.cc_snap.subp.subp")
     def test_add_assertions_adds_assertions_as_dict(
@@ -161,11 +166,12 @@ class TestAddAssertions:
         compare_file = tmpdir.join("comparison")
         combined = "\n".join(assertions.values())
         util.write_file(compare_file, combined.encode("utf-8"))
-        assert util.load_file(compare_file) == util.load_file(assert_file)
+        assert util.load_text_file(compare_file) == util.load_text_file(
+            assert_file
+        )
 
 
 class TestRunCommands(CiTestCase):
-
     with_logs = True
     allowed_subp = [CiTestCase.SUBP_SHELL_TRUE]
 
@@ -189,71 +195,34 @@ class TestRunCommands(CiTestCase):
             str(context_manager.exception),
         )
 
-    def test_run_command_logs_commands_and_exit_codes_to_stderr(self):
-        """All exit codes are logged to stderr."""
-        outfile = self.tmp_path("output.log", dir=self.tmp)
 
-        cmd1 = 'echo "HI" >> %s' % outfile
-        cmd2 = "bogus command"
-        cmd3 = 'echo "MOM" >> %s' % outfile
-        commands = [cmd1, cmd2, cmd3]
-
-        mock_path = "cloudinit.config.cc_snap.sys.stderr"
-        with mock.patch(mock_path, new_callable=StringIO) as m_stderr:
-            with self.assertRaises(RuntimeError) as context_manager:
-                run_commands(commands=commands)
-
-        self.assertIsNotNone(
-            re.search(
-                r"bogus: (command )?not found", str(context_manager.exception)
-            ),
-            msg="Expected bogus command not found",
-        )
-        expected_stderr_log = "\n".join(
-            [
-                "Begin run command: {cmd}".format(cmd=cmd1),
-                "End run command: exit(0)",
-                "Begin run command: {cmd}".format(cmd=cmd2),
-                "ERROR: End run command: exit(127)",
-                "Begin run command: {cmd}".format(cmd=cmd3),
-                "End run command: exit(0)\n",
-            ]
-        )
-        self.assertEqual(expected_stderr_log, m_stderr.getvalue())
-
-    def test_run_command_as_lists(self):
-        """When commands are specified as a list, run them in order."""
-        outfile = self.tmp_path("output.log", dir=self.tmp)
-
-        cmd1 = 'echo "HI" >> %s' % outfile
-        cmd2 = 'echo "MOM" >> %s' % outfile
-        commands = [cmd1, cmd2]
-        mock_path = "cloudinit.config.cc_snap.sys.stderr"
-        with mock.patch(mock_path, new_callable=StringIO):
-            run_commands(commands=commands)
-
-        self.assertIn(
-            "DEBUG: Running user-provided snap commands", self.logs.getvalue()
-        )
-        self.assertEqual("HI\nMOM\n", util.load_file(outfile))
-        self.assertIn(
-            "WARNING: Non-snap commands in snap config:", self.logs.getvalue()
-        )
-
-    def test_run_command_dict_sorted_as_command_script(self):
+@pytest.mark.allow_all_subp
+class TestCommands:
+    def test_run_command_dict_sorted_as_command_script(self, caplog, tmp_path):
         """When commands are a dict, sort them and run."""
-        outfile = self.tmp_path("output.log", dir=self.tmp)
-        cmd1 = 'echo "HI" >> %s' % outfile
-        cmd2 = 'echo "MOM" >> %s' % outfile
+        outfile = f"{tmp_path}/output.log"
+        cmd1 = f'echo "HI" >> {outfile}'
+        cmd2 = f'echo "MOM" >> {outfile}'
         commands = {"02": cmd1, "01": cmd2}
-        mock_path = "cloudinit.config.cc_snap.sys.stderr"
-        with mock.patch(mock_path, new_callable=StringIO):
-            run_commands(commands=commands)
+        run_commands(commands=commands)
 
-        expected_messages = ["DEBUG: Running user-provided snap commands"]
+        expected_messages = ["Running user-provided snap commands"]
         for message in expected_messages:
-            self.assertIn(message, self.logs.getvalue())
-        self.assertEqual("MOM\nHI\n", util.load_file(outfile))
+            assert message in caplog.text
+        assert "MOM\nHI\n" == util.load_text_file(outfile)
+
+    def test_run_command_as_lists(self, caplog, tmp_path):
+        """When commands are specified as a list, run them in order."""
+        outfile = "output.log"
+
+        cmd1 = f'echo "HI" >> {tmp_path}/{outfile}'
+        cmd2 = f'echo "MOM" >> {tmp_path}/{outfile}'
+        commands = [cmd1, cmd2]
+        run_commands(commands=commands)
+
+        assert "Running user-provided snap commands" in caplog.text
+        assert "HI\nMOM\n" == util.load_text_file(f"{tmp_path}/{outfile}")
+        assert "Non-snap commands in snap config:" in caplog.text
 
 
 @skipUnlessJsonSchema()
@@ -266,28 +235,41 @@ class TestSnapSchema:
             ({"snap": {"commands": {"01": "also valid"}}}, None),
             ({"snap": {"assertions": ["valid"]}}, None),
             ({"snap": {"assertions": {"01": "also valid"}}}, None),
-            ({"commands": [["echo", "bye"], ["echo", "bye"]]}, None),
-            ({"commands": ["echo bye", "echo bye"]}, None),
+            ({"snap": {"commands": [["echo", "bye"], ["echo", "bye"]]}}, None),
+            ({"snap": {"commands": ["echo bye", "echo bye"]}}, None),
             (
-                {"commands": {"00": ["echo", "bye"], "01": ["echo", "bye"]}},
+                {
+                    "snap": {
+                        "commands": {
+                            "00": ["echo", "bye"],
+                            "01": ["echo", "bye"],
+                        }
+                    }
+                },
                 None,
             ),
-            ({"commands": {"00": "echo bye", "01": "echo bye"}}, None),
+            (
+                {"snap": {"commands": {"00": "echo bye", "01": "echo bye"}}},
+                None,
+            ),
             # Invalid
             ({"snap": "wrong type"}, "'wrong type' is not of type 'object'"),
             (
                 {"snap": {"commands": ["ls"], "invalid-key": ""}},
                 "Additional properties are not allowed",
             ),
-            ({"snap": {}}, "{} does not have enough properties"),
+            ({"snap": {}}, f"{{}} {SCHEMA_EMPTY_ERROR}"),
             (
                 {"snap": {"commands": "broken"}},
                 "'broken' is not of type 'object', 'array'",
             ),
-            ({"snap": {"commands": []}}, r"snap.commands: \[\] is too short"),
+            (
+                {"snap": {"commands": []}},
+                rf"snap.commands: \[\] {SCHEMA_EMPTY_ERROR}",
+            ),
             (
                 {"snap": {"commands": {}}},
-                r"snap.commands: {} does not have enough properties",
+                rf"snap.commands: {{}} {SCHEMA_EMPTY_ERROR}",
             ),
             ({"snap": {"commands": [123]}}, ""),
             ({"snap": {"commands": {"01": 123}}}, ""),
@@ -302,10 +284,10 @@ class TestSnapSchema:
                 {"snap": {"assertions": "broken"}},
                 "'broken' is not of type 'object', 'array'",
             ),
-            ({"snap": {"assertions": []}}, r"\[\] is too short"),
+            ({"snap": {"assertions": []}}, rf"\[\] {SCHEMA_EMPTY_ERROR}"),
             (
                 {"snap": {"assertions": {}}},
-                r"\{} does not have enough properties",
+                rf"\{{}} {SCHEMA_EMPTY_ERROR}",
             ),
         ],
     )
@@ -319,8 +301,11 @@ class TestSnapSchema:
 
 
 class TestHandle:
+    @mock.patch("cloudinit.util.wait_for_snap_seeded")
     @mock.patch("cloudinit.config.cc_snap.subp.subp")
-    def test_handle_adds_assertions(self, m_subp, fake_cloud, tmpdir):
+    def test_handle_adds_assertions(
+        self, m_subp, wait_for_snap_seeded, fake_cloud, tmpdir
+    ):
         """Any configured snap assertions are provided to add_assertions."""
         assert_file = os.path.join(
             fake_cloud.paths.get_ipath_cur(), "snapd.assertions"
@@ -329,10 +314,10 @@ class TestHandle:
         cfg = {
             "snap": {"assertions": [SYSTEM_USER_ASSERTION, ACCOUNT_ASSERTION]}
         }
-        handle("snap", cfg=cfg, cloud=fake_cloud, log=mock.Mock(), args=None)
+        handle("snap", cfg=cfg, cloud=fake_cloud, args=None)
         content = "\n".join(cfg["snap"]["assertions"])
         util.write_file(compare_file, content.encode("utf-8"))
-        assert util.load_file(compare_file) == util.load_file(assert_file)
-
-
-# vi: ts=4 expandtab
+        assert util.load_text_file(compare_file) == util.load_text_file(
+            assert_file
+        )
+        wait_for_snap_seeded.assert_called_once_with(fake_cloud)

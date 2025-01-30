@@ -13,22 +13,34 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pycloudlib.ec2.instance import EC2Instance
+from pycloudlib.gce.instance import GceInstance
 
 import cloudinit.config
+from cloudinit import lifecycle
 from cloudinit.util import is_true
-from tests.integration_tests.clouds import ImageSpecification
 from tests.integration_tests.decorators import retry
 from tests.integration_tests.instances import IntegrationInstance
+from tests.integration_tests.integration_settings import (
+    OS_IMAGE_TYPE,
+    PLATFORM,
+)
+from tests.integration_tests.releases import CURRENT_RELEASE, IS_UBUNTU, JAMMY
 from tests.integration_tests.util import (
     get_feature_flag_value,
     get_inactive_modules,
     lxd_has_nocloud,
-    verify_clean_log,
+    network_wait_logged,
+    verify_clean_boot,
     verify_ordered_items_in_text,
 )
 
 USER_DATA = """\
 #cloud-config
+users:
+- default
+- name: craig
+  sudo: false  # make sure craig doesn't get elevated perms
 apt:
   primary:
     - arches: [default]
@@ -56,13 +68,14 @@ rsyslog:
       content: |
         module(load="imtcp")
         input(type="imtcp" port="514")
-        $template RemoteLogs,"/var/tmp/rsyslog.log"
+        $template RemoteLogs,"/var/spool/rsyslog/cloudinit.log"
         *.* ?RemoteLogs
         & ~
   remotes:
     me: "127.0.0.1"
 runcmd:
   - echo 'hello world' > /var/tmp/runcmd_output
+  - echo '💩' > /var/tmp/unicode_data
 
   - #
   - logger "My test log"
@@ -72,18 +85,26 @@ snap:
 ssh_import_id:
   - lp:smoser
 
-timezone: US/Aleutian
+timezone: Europe/Madrid
 """
 
 
 @pytest.mark.ci
 @pytest.mark.user_data(USER_DATA)
 class TestCombined:
-    @pytest.mark.ubuntu  # Because netplan
+    @pytest.mark.skipif(not IS_UBUNTU, reason="Uses netplan")
     def test_netplan_permissions(self, class_client: IntegrationInstance):
         """
         Test that netplan config file is generated with proper permissions
         """
+        log = class_client.read_from_file("/var/log/cloud-init.log")
+        if CURRENT_RELEASE < JAMMY:
+            assert (
+                "No netplan python module. Fallback to write"
+                " /etc/netplan/50-cloud-init.yaml" in log
+            )
+        else:
+            assert "Rendered netplan config using netplan python API" in log
         file_perms = class_client.execute(
             "stat -c %a /etc/netplan/50-cloud-init.yaml"
         )
@@ -105,13 +126,40 @@ class TestCombined:
         log = client.read_from_file("/var/log/cloud-init.log")
         expected = (
             "This is my final message!\n"
-            r"\d+\.\d+.*\n"
+            r"\d+\.(\d+|daily).*\n"
             r"\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} \+\d{4}\n"  # Datetime
             "DataSource.*\n"
             r"\d+\.\d+"
         )
 
         assert re.search(expected, log)
+
+    def test_deprecated_message(self, class_client: IntegrationInstance):
+        """Check that deprecated key produces a log warning"""
+        client = class_client
+        log = client.read_from_file("/var/log/cloud-init.log")
+        version_boundary = get_feature_flag_value(
+            class_client, "DEPRECATION_INFO_BOUNDARY"
+        )
+        deprecated_messages = ["users.1.sudo:  Changed in version 22.2."]
+        boundary_message = (
+            "The value of 'false' in user craig's 'sudo'"
+            " config is deprecated"
+        )
+        # the changed_version is 22.2 in schema for user.sudo key in
+        # user-data. Pass 22.2 in against the client's version_boundary.
+        if lifecycle.should_log_deprecation("22.2", version_boundary):
+            deprecated_messages.append(boundary_message)
+        else:
+            # Expect the distros deprecated call to be redacted.
+            # jsonschema still emits deprecation log due to changed_version
+            # instead of deprecated_version
+            assert f"[INFO]: {boundary_message}" in log
+        verify_clean_boot(
+            class_client,
+            require_deprecations=deprecated_messages,
+            ignore_warnings=True,
+        )
 
     def test_ntp_with_apt(self, class_client: IntegrationInstance):
         """LP #1628337.
@@ -137,14 +185,16 @@ class TestCombined:
         assert "LANG=en_GB.UTF-8" in default_locale
 
         locale_a = client.execute("locale -a")
-        verify_ordered_items_in_text(["en_GB.utf8", "en_US.utf8"], locale_a)
-
-        locale_gen = client.execute(
-            "cat /etc/locale.gen | grep -v '^#' | uniq"
-        )
-        verify_ordered_items_in_text(
-            ["en_GB.UTF-8", "en_US.UTF-8"], locale_gen
-        )
+        locale_gen = client.execute("grep -v '^#' /etc/locale.gen | uniq")
+        if OS_IMAGE_TYPE == "minimal":
+            # Minimal images don't have a en_US.utf8 locale
+            expected_locales = ["C.utf8", "en_GB.utf8"]
+            expected_locale_gen = ["en_GB.UTF-8", "UTF-8"]
+        else:
+            expected_locales = ["en_GB.utf8", "en_US.utf8"]
+            expected_locale_gen = ["en_GB.UTF-8", "en_US.UTF-8"]
+        verify_ordered_items_in_text(expected_locales, locale_a)
+        verify_ordered_items_in_text(expected_locale_gen, locale_gen)
 
     def test_random_seed_data(self, class_client: IntegrationInstance):
         """Integration test for the random seed module.
@@ -161,9 +211,11 @@ class TestCombined:
         assert result.startswith("MYUb34023nD:LFDK10913jk;dfnk:Df")
 
     def test_rsyslog(self, class_client: IntegrationInstance):
-        """Test rsyslog is configured correctly."""
-        client = class_client
-        assert "My test log" in client.read_from_file("/var/tmp/rsyslog.log")
+        """Test rsyslog is configured correctly when applicable."""
+        if class_client.execute("command -v rsyslogd").ok:
+            assert "My test log" in class_client.read_from_file(
+                "/var/spool/rsyslog/cloudinit.log"
+            )
 
     def test_runcmd(self, class_client: IntegrationInstance):
         """Test runcmd works as expected"""
@@ -191,12 +243,10 @@ class TestCombined:
         timezone_output = client.execute(
             'date "+%Z" --date="Thu, 03 Nov 2016 00:47:00 -0400"'
         )
-        assert timezone_output.strip() == "HDT"
+        assert timezone_output.strip() == "CET"
 
     def test_no_problems(self, class_client: IntegrationInstance):
-        """Test no errors, warnings, deprecations, tracebacks or
-        inactive modules.
-        """
+        """Test no errors, warnings, tracebacks or inactive modules."""
         client = class_client
         status_file = client.read_from_file("/run/cloud-init/status.json")
         status_json = json.loads(status_file)["v1"]
@@ -207,10 +257,21 @@ class TestCombined:
         assert result_json["errors"] == []
 
         log = client.read_from_file("/var/log/cloud-init.log")
-        verify_clean_log(log, ignore_deprecations=False)
+        require_warnings = []
+        if class_client.execute("command -v rsyslogd").failed:
+            # Some minimal images may not have an installed rsyslog package
+            # Test user-data doesn't provide install_rsyslog: true so expect
+            # warnings when not installed.
+            require_warnings.append(
+                "Failed to reload-or-try-restart rsyslog.service:"
+                " Unit rsyslog.service not found."
+            )
+        # Set ignore_deprecations=True as test_deprecated_message covers this
+        verify_clean_boot(
+            client, ignore_deprecations=True, require_warnings=require_warnings
+        )
         requested_modules = {
             "apt_configure",
-            "apt_pipelining",
             "byobu",
             "final_message",
             "locale",
@@ -249,6 +310,7 @@ class TestCombined:
                 "gce": "DataSourceGCELocal",
                 "oci": "DataSourceOracle",
                 "openstack": "DataSourceOpenStackLocal [net,ver=2]",
+                "qemu": "DataSourceNoCloud [seed=/dev/vda][dsmode=net]",
             }
             assert (
                 platform_datasources[client.settings.PLATFORM]
@@ -289,19 +351,58 @@ class TestCombined:
         assert data["base64_encoded_keys"] == []
         assert data["merged_cfg"] == "redacted for non-root user"
 
-        image_spec = ImageSpecification.from_os_image()
-        image_spec = ImageSpecification.from_os_image()
-        assert data["sys_info"]["dist"][0] == image_spec.os
+        assert data["sys_info"]["dist"][0] == CURRENT_RELEASE.os
 
         v1_data = data["v1"]
-        assert re.match(r"\d\.\d+\.\d+-\d+", v1_data["kernel_release"])
-        assert v1_data["variant"] == image_spec.os
-        assert v1_data["distro"] == image_spec.os
-        assert v1_data["distro_release"] == image_spec.release
+        assert v1_data["variant"] == CURRENT_RELEASE.os
+        assert v1_data["distro"] == CURRENT_RELEASE.os
+        assert v1_data["distro_release"] == CURRENT_RELEASE.series
         assert v1_data["machine"] == "x86_64"
         assert re.match(r"3.\d+\.\d+", v1_data["python_version"])
 
-    @pytest.mark.lxd_container
+    @pytest.mark.skipif(not IS_UBUNTU, reason="Testing default_user ubuntu")
+    def test_combined_cloud_config_json(
+        self, class_client: IntegrationInstance
+    ):
+        client = class_client
+        combined_json = client.read_from_file(
+            "/run/cloud-init/combined-cloud-config.json"
+        )
+        data = json.loads(combined_json)
+        expected_features = json.loads(
+            client.execute(
+                "python3 -c 'import json; from cloudinit import features; "
+                "print(json.dumps(features.get_features()))'"
+            )
+        )
+        assert data["features"] == expected_features
+        assert data["system_info"]["default_user"]["name"] == "ubuntu"
+
+    @pytest.mark.skipif(
+        PLATFORM not in ("lxd_vm", "lxd_container"),
+        reason="Test is LXD specific",
+    )
+    def test_network_config_json(self, class_client: IntegrationInstance):
+        client = class_client
+        network_json = client.read_from_file(
+            "/run/cloud-init/network-config.json"
+        )
+        devname = "eth0" if PLATFORM == "lxd_container" else "enp5s0"
+        assert {
+            "config": [
+                {
+                    "name": devname,
+                    "subnets": [{"control": "auto", "type": "dhcp"}],
+                    "type": "physical",
+                }
+            ],
+            "version": 1,
+        } == json.loads(network_json)
+
+    @pytest.mark.skipif(
+        PLATFORM != "lxd_container",
+        reason="Test is LXD container specific",
+    )
     def test_instance_json_lxd(self, class_client: IntegrationInstance):
         client = class_client
         instance_json_file = client.read_from_file(
@@ -337,7 +438,7 @@ class TestCombined:
         assert v1_data["local_hostname"] == client.instance.name
         assert v1_data["region"] is None
 
-    @pytest.mark.lxd_vm
+    @pytest.mark.skipif(PLATFORM != "lxd_vm", reason="Test is LXD VM specific")
     def test_instance_json_lxd_vm(self, class_client: IntegrationInstance):
         client = class_client
         instance_json_file = client.read_from_file(
@@ -382,7 +483,7 @@ class TestCombined:
         assert v1_data["local_hostname"] == client.instance.name
         assert v1_data["region"] is None
 
-    @pytest.mark.ec2
+    @pytest.mark.skipif(PLATFORM != "ec2", reason="Test is ec2 specific")
     def test_instance_json_ec2(self, class_client: IntegrationInstance):
         client = class_client
         instance_json_file = client.read_from_file(
@@ -398,6 +499,9 @@ class TestCombined:
             "/run/cloud-init/cloud-id-aws"
         )
         assert v1_data["subplatform"].startswith("metadata")
+
+        # type narrow since availability_zone is not a BaseInstance attribute
+        assert isinstance(client.instance, EC2Instance)
         assert (
             v1_data["availability_zone"] == client.instance.availability_zone
         )
@@ -405,7 +509,7 @@ class TestCombined:
         assert v1_data["local_hostname"].startswith("ip-")
         assert v1_data["region"] == client.cloud.cloud_instance.region
 
-    @pytest.mark.gce
+    @pytest.mark.skipif(PLATFORM != "gce", reason="Test is GCE specific")
     def test_instance_json_gce(self, class_client: IntegrationInstance):
         client = class_client
         instance_json_file = client.read_from_file(
@@ -420,9 +524,43 @@ class TestCombined:
             "/run/cloud-init/cloud-id-gce"
         )
         assert v1_data["subplatform"].startswith("metadata")
+        # type narrow since zone and instance_id are not BaseInstance
+        # attributes
+        assert isinstance(client.instance, GceInstance)
         assert v1_data["availability_zone"] == client.instance.zone
-        assert v1_data["instance_id"] == client.instance.instance_id
+        assert v1_data["instance_id"] == client.instance.id
         assert v1_data["local_hostname"] == client.instance.name
+
+    @pytest.mark.skipif(
+        PLATFORM not in ["lxd_container", "azure", "gce", "ec2"],
+        reason=(
+            f"Test was written for {PLATFORM} but can likely run on "
+            "other platforms."
+        ),
+    )
+    def test_instance_cloud_id_across_reboot(
+        self, class_client: IntegrationInstance
+    ):
+        client = class_client
+        platform = client.settings.PLATFORM
+        cloud_id_alias = {"ec2": "aws", "lxd_container": "lxd"}
+        cloud_file = f"cloud-id-{cloud_id_alias.get(platform, platform)}"
+        assert client.execute(f"test -f /run/cloud-init/{cloud_file}").ok
+        assert client.execute("test -f /run/cloud-init/cloud-id").ok
+        client.restart()
+        assert client.execute(f"test -f /run/cloud-init/{cloud_file}").ok
+        assert client.execute("test -f /run/cloud-init/cloud-id").ok
+
+    def test_unicode(self, class_client: IntegrationInstance):
+        client = class_client
+        assert "💩" == client.read_from_file("/var/tmp/unicode_data")
+
+    @pytest.mark.skipif(not IS_UBUNTU, reason="Ubuntu-only behavior")
+    def test_networkd_wait_online(self, class_client: IntegrationInstance):
+        client = class_client
+        assert not network_wait_logged(
+            client.read_from_file("/var/log/cloud-init.log")
+        )
 
 
 @pytest.mark.user_data(USER_DATA)

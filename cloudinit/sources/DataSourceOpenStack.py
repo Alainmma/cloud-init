@@ -4,11 +4,10 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 import time
 
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import sources, url_helper, util
+from cloudinit import dmi, sources, url_helper, util
 from cloudinit.event import EventScope, EventType
 from cloudinit.net.dhcp import NoDHCPLeaseError
 from cloudinit.net.ephemeral import EphemeralDHCPv4
@@ -18,7 +17,6 @@ from cloudinit.sources.helpers import openstack
 LOG = logging.getLogger(__name__)
 
 # Various defaults/constants...
-DEF_MD_URLS = ["http://[fe80::a9fe:a9fe]", "http://169.254.169.254"]
 DEFAULT_IID = "iid-dsopenstack"
 DEFAULT_METADATA = {
     "instance-id": DEFAULT_IID,
@@ -33,10 +31,12 @@ DMI_ASSET_TAG_OPENTELEKOM = "OpenTelekomCloud"
 # -> compute.defaults.vmware.smbios_asset_tag for this value
 DMI_ASSET_TAG_SAPCCLOUD = "SAP CCloud VM"
 DMI_ASSET_TAG_HUAWEICLOUD = "HUAWEICLOUD"
+DMI_ASSET_TAG_SAMSUNGCLOUDPLATFORM = "Samsung Cloud Platform"
 VALID_DMI_ASSET_TAGS = VALID_DMI_PRODUCT_NAMES
 VALID_DMI_ASSET_TAGS += [
     DMI_ASSET_TAG_HUAWEICLOUD,
     DMI_ASSET_TAG_OPENTELEKOM,
+    DMI_ASSET_TAG_SAMSUNGCLOUDPLATFORM,
     DMI_ASSET_TAG_SAPCCLOUD,
 ]
 
@@ -74,6 +74,12 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
         return mstr
 
     def wait_for_metadata_service(self):
+        DEF_MD_URLS = [
+            "http://[fe80::a9fe:a9fe%25{iface}]".format(
+                iface=self.distro.fallback_interface
+            ),
+            "http://169.254.169.254",
+        ]
         urls = self.ds_cfg.get("metadata_urls", DEF_MD_URLS)
         filtered = [x for x in urls if util.is_resolvable_url(x)]
         if set(filtered) != set(urls):
@@ -95,7 +101,7 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
             url2base[md_url] = url
 
         url_params = self.get_url_params()
-        start_time = time.time()
+        start_time = time.monotonic()
         avail_url, _response = url_helper.wait_for_url(
             urls=md_urls,
             max_wait=url_params.max_wait_seconds,
@@ -108,7 +114,7 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
             LOG.debug(
                 "Giving up on OpenStack md from %s after %s seconds",
                 md_urls,
-                int(time.time() - start_time),
+                int(time.monotonic() - start_time),
             )
 
         self.metadata_address = url2base.get(avail_url)
@@ -150,21 +156,14 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
             False when unable to contact metadata service or when metadata
             format is invalid or disabled.
         """
-        oracle_considered = "Oracle" in self.sys_cfg.get("datasource_list")
-        if not detect_openstack(accept_oracle=not oracle_considered):
-            return False
 
         if self.perform_dhcp_setup:  # Setup networking in init-local stage.
             try:
+
                 with EphemeralDHCPv4(
-                    self.fallback_interface,
-                    tmp_dir=self.distro.get_tmp_exec_path(),
+                    self.distro, self.distro.fallback_interface
                 ):
-                    results = util.log_time(
-                        logfunc=LOG.debug,
-                        msg="Crawl of metadata service",
-                        func=self._crawl_metadata,
-                    )
+                    results = self._crawl_metadata()
             except (NoDHCPLeaseError, sources.InvalidMetaDataException) as e:
                 util.logexc(LOG, str(e))
                 return False
@@ -188,7 +187,6 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
         self.files.update(results.get("files", {}))
 
         vd = results.get("vendordata")
-        self.vendordata_pure = vd
         try:
             self.vendordata_raw = sources.convert_vendordata(vd)
         except ValueError as e:
@@ -196,7 +194,6 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
             self.vendordata_raw = None
 
         vd2 = results.get("vendordata2")
-        self.vendordata2_pure = vd2
         try:
             self.vendordata2_raw = sources.convert_vendordata(vd2)
         except ValueError as e:
@@ -227,16 +224,11 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
         url_params = self.get_url_params()
 
         try:
-            result = util.log_time(
-                LOG.debug,
-                "Crawl of openstack metadata service",
-                read_metadata_service,
-                args=[self.metadata_address],
-                kwargs={
-                    "ssl_details": self.ssl_details,
-                    "retries": url_params.num_retries,
-                    "timeout": url_params.timeout_seconds,
-                },
+            result = read_metadata_service(
+                self.metadata_address,
+                ssl_details=self.ssl_details,
+                retries=url_params.num_retries,
+                timeout=url_params.timeout_seconds,
             )
         except openstack.NonReadable as e:
             raise sources.InvalidMetaDataException(str(e))
@@ -246,6 +238,24 @@ class DataSourceOpenStack(openstack.SourceMixin, sources.DataSource):
             )
             raise sources.InvalidMetaDataException(msg) from e
         return result
+
+    def ds_detect(self):
+        """Return True when a potential OpenStack platform is detected."""
+        accept_oracle = "Oracle" in self.sys_cfg.get("datasource_list")
+        if not util.is_x86():
+            # Non-Intel cpus don't properly report dmi product names
+            return True
+
+        product_name = dmi.read_dmi_data("system-product-name")
+        if product_name in VALID_DMI_PRODUCT_NAMES:
+            return True
+        elif dmi.read_dmi_data("chassis-asset-tag") in VALID_DMI_ASSET_TAGS:
+            return True
+        elif accept_oracle and oracle._is_platform_viable():
+            return True
+        elif util.get_proc_env(1).get("product_name") == DMI_PRODUCT_NOVA:
+            return True
+        return False
 
 
 class DataSourceOpenStackLocal(DataSourceOpenStack):
@@ -267,22 +277,6 @@ def read_metadata_service(base_url, ssl_details=None, timeout=5, retries=5):
     return reader.read_v2()
 
 
-def detect_openstack(accept_oracle=False):
-    """Return True when a potential OpenStack platform is detected."""
-    if not util.is_x86():
-        return True  # Non-Intel cpus don't properly report dmi product names
-    product_name = dmi.read_dmi_data("system-product-name")
-    if product_name in VALID_DMI_PRODUCT_NAMES:
-        return True
-    elif dmi.read_dmi_data("chassis-asset-tag") in VALID_DMI_ASSET_TAGS:
-        return True
-    elif accept_oracle and oracle._is_platform_viable():
-        return True
-    elif util.get_proc_env(1).get("product_name") == DMI_PRODUCT_NOVA:
-        return True
-    return False
-
-
 # Used to match classes to dependencies
 datasources = [
     (DataSourceOpenStackLocal, (sources.DEP_FILESYSTEM,)),
@@ -293,6 +287,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

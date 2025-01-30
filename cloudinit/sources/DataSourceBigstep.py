@@ -41,7 +41,7 @@ class DataSourceBigstep(sources.DataSource):
             self.paths.cloud_dir, "data", "seed", "bigstep", "url"
         )
         try:
-            content = util.load_file(url_file)
+            content = util.load_text_file(url_file)
         except IOError as e:
             # If the file doesn't exist, then the server probably isn't a
             # Bigstep instance; otherwise, another problem exists which needs
@@ -62,6 +62,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

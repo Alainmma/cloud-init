@@ -4,13 +4,14 @@ TODO:
 * This module assumes that the "ubuntu" user will be created when "default" is
   specified; this will need modification to run on other OSes.
 """
+
 import re
 
 import pytest
 
-from tests.integration_tests.clouds import ImageSpecification
 from tests.integration_tests.instances import IntegrationInstance
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.releases import CURRENT_RELEASE, IS_UBUNTU, JAMMY
+from tests.integration_tests.util import verify_clean_boot
 
 USER_DATA = """\
 #cloud-config
@@ -35,6 +36,9 @@ AHWYPYb2FT.lbioDm2RrkJPb9BZMN1O/
     sudo: ALL=(ALL) NOPASSWD:ALL
     groups: [cloud-users, secret]
     lock_passwd: true
+  - name: nopassworduser
+    gecos: I do not like passwords
+    lock_passwd: false
   - name: cloudy
     gecos: Magic Cloud App Daemon User
     inactive: '0'
@@ -46,6 +50,10 @@ AHWYPYb2FT.lbioDm2RrkJPb9BZMN1O/
     uid: 1743
 """
 
+NEW_USER_EMPTY_PASSWD_WARNING = "Not unlocking password for user {username}. 'lock_passwd: false' present in user-data but no 'passwd'/'plain_text_passwd'/'hashed_passwd' provided in user-data"  # noqa: E501
+
+EXISTING_USER_EMPTY_PASSWD_WARNING = "Not unlocking blank password for existing user {username}. 'lock_passwd: false' present in user-data but no existing password set and no 'plain_text_passwd'/'hashed_passwd' provided in user-data"  # noqa E501
+
 
 @pytest.mark.ci
 @pytest.mark.user_data(USER_DATA)
@@ -56,7 +64,7 @@ class TestUsersGroups:
     confirms that they have been configured correctly in the system under test.
     """
 
-    @pytest.mark.ubuntu
+    @pytest.mark.skipif(not IS_UBUNTU, reason="Test assumes 'ubuntu' user")
     @pytest.mark.parametrize(
         "getent_args,regex",
         [
@@ -85,6 +93,11 @@ class TestUsersGroups:
             (["passwd", "eric"], r"eric:x:1742:"),
             # Test int uid
             (["passwd", "archivist"], r"archivist:x:1743:"),
+            # Test int uid
+            (
+                ["passwd", "nopassworduser"],
+                r"nopassworduser:x:[0-9]{4}:[0-9]{4}:I do not like passwords",
+            ),
         ],
     )
     def test_users_groups(self, regex, getent_args, class_client):
@@ -99,15 +112,49 @@ class TestUsersGroups:
 
     def test_user_root_in_secret(self, class_client):
         """Test root user is in 'secret' group."""
-        log = class_client.read_from_file("/var/log/cloud-init.log")
-        verify_clean_log(log)
+        verify_clean_boot(
+            class_client,
+            require_warnings=[
+                NEW_USER_EMPTY_PASSWD_WARNING.format(username="nopassworduser")
+            ],
+        )
         output = class_client.execute("groups root").stdout
         _, groups_str = output.split(":", maxsplit=1)
         groups = groups_str.split()
         assert "secret" in groups
 
+    def test_nopassword_unlock_warnings(self, class_client):
+        """Verify warnings for empty passwords for new and existing users."""
+        verify_clean_boot(
+            class_client,
+            require_warnings=[
+                NEW_USER_EMPTY_PASSWD_WARNING.format(username="nopassworduser")
+            ],
+        )
+
+        # Fake admin clearing and unlocking and empty unlocked password foobar
+        # This will generate additional warnings about not unlocking passwords
+        # for pre-existing users which have an existing empty password
+        class_client.execute("passwd -d foobar")
+        class_client.instance.clean()
+        class_client.restart()
+        verify_clean_boot(
+            class_client,
+            ignore_warnings=True,  # ignore warnings about existing groups
+            require_warnings=[
+                EXISTING_USER_EMPTY_PASSWD_WARNING.format(
+                    username="nopassworduser"
+                ),
+                EXISTING_USER_EMPTY_PASSWD_WARNING.format(username="foobar"),
+            ],
+        )
+
 
 @pytest.mark.user_data(USER_DATA)
+@pytest.mark.skipif(
+    CURRENT_RELEASE < JAMMY,
+    reason="Requires version of sudo not available in older releases",
+)
 def test_sudoers_includedir(client: IntegrationInstance):
     """Ensure we don't add additional #includedir to sudoers.
 
@@ -117,15 +164,11 @@ def test_sudoers_includedir(client: IntegrationInstance):
 
     https://github.com/canonical/cloud-init/pull/783
     """
-    if ImageSpecification.from_os_image().release in [
-        "bionic",
-        "focal",
-    ]:
-        raise pytest.skip(
-            "Test requires version of sudo installed on groovy and later"
-        )
     client.execute("sed -i 's/#include/@include/g' /etc/sudoers")
 
+    sudoers_content_before = client.read_from_file(
+        "/etc/sudoers.d/90-cloud-init-users"
+    ).splitlines()[1:]
     sudoers = client.read_from_file("/etc/sudoers")
     if "@includedir /etc/sudoers.d" not in sudoers:
         client.execute("echo '@includedir /etc/sudoers.d' >> /etc/sudoers")
@@ -135,3 +178,8 @@ def test_sudoers_includedir(client: IntegrationInstance):
 
     assert "#includedir" not in sudoers
     assert sudoers.count("includedir /etc/sudoers.d") == 1
+
+    sudoers_content_after = client.read_from_file(
+        "/etc/sudoers.d/90-cloud-init-users"
+    ).splitlines()[1:]
+    assert sudoers_content_before == sudoers_content_after

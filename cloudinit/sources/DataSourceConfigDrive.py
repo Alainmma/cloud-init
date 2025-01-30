@@ -6,10 +6,10 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 import os
 
-from cloudinit import log as logging
-from cloudinit import sources, subp, util
+from cloudinit import lifecycle, sources, subp, util
 from cloudinit.event import EventScope, EventType
 from cloudinit.net import eni
 from cloudinit.sources.DataSourceIBMCloud import get_ibm_platform
@@ -19,7 +19,6 @@ LOG = logging.getLogger(__name__)
 
 # Various defaults/constants...
 DEFAULT_IID = "iid-dsconfigdrive"
-DEFAULT_MODE = "pass"
 DEFAULT_METADATA = {
     "instance-id": DEFAULT_IID,
 }
@@ -27,7 +26,7 @@ FS_TYPES = ("vfat", "iso9660")
 LABEL_TYPES = ("config-2", "CONFIG-2")
 POSSIBLE_MOUNTS = ("sr", "cd")
 OPTICAL_DEVICES = tuple(
-    ("/dev/%s%s" % (z, i) for z in POSSIBLE_MOUNTS for i in range(0, 2))
+    ("/dev/%s%s" % (z, i) for z in POSSIBLE_MOUNTS for i in range(2))
 )
 
 
@@ -142,7 +141,6 @@ class DataSourceConfigDrive(openstack.SourceMixin, sources.DataSource):
         self.files.update(results.get("files", {}))
 
         vd = results.get("vendordata")
-        self.vendordata_pure = vd
         try:
             self.vendordata_raw = sources.convert_vendordata(vd)
         except ValueError as e:
@@ -150,14 +148,13 @@ class DataSourceConfigDrive(openstack.SourceMixin, sources.DataSource):
             self.vendordata_raw = None
 
         vd2 = results.get("vendordata2")
-        self.vendordata2_pure = vd2
         try:
             self.vendordata2_raw = sources.convert_vendordata(vd2)
         except ValueError as e:
             LOG.warning("Invalid content in vendor-data2: %s", e)
             self.vendordata2_raw = None
 
-        # network_config is an /etc/network/interfaces formated file and is
+        # network_config is an /etc/network/interfaces formatted file and is
         # obsolete compared to networkdata (from network_data.json) but both
         # might be present.
         self.network_eni = results.get("network_config")
@@ -179,6 +176,14 @@ class DataSourceConfigDrive(openstack.SourceMixin, sources.DataSource):
             elif self.network_eni is not None:
                 self._network_config = eni.convert_eni_data(self.network_eni)
                 LOG.debug("network config provided via converted eni data")
+                lifecycle.deprecate(
+                    deprecated="Eni network configuration in ConfigDrive",
+                    deprecated_version="24.3",
+                    extra_message=(
+                        "You can use openstack's network "
+                        "configuration format instead"
+                    ),
+                )
             else:
                 LOG.debug("no network configuration available")
         return self._network_config
@@ -203,7 +208,7 @@ def read_config_drive(source_dir):
         (reader.read_v1, [], {}),
     ]
     excps = []
-    for (functor, args, kwargs) in finders:
+    for functor, args, kwargs in finders:
         try:
             return functor(*args, **kwargs)
         except openstack.NonReadable as e:
@@ -217,7 +222,7 @@ def get_previous_iid(paths):
     # hasn't declared itself found.
     fname = os.path.join(paths.get_cpath("data"), "instance-id")
     try:
-        return util.load_file(fname).rstrip("\n")
+        return util.load_text_file(fname).rstrip("\n")
     except IOError:
         return None
 
@@ -239,7 +244,7 @@ def on_first_boot(data, distro=None, network=True):
 def write_injected_files(files):
     if files:
         LOG.debug("Writing %s injected files", len(files))
-        for (filename, content) in files.items():
+        for filename, content in files.items():
             if not filename.startswith(os.sep):
                 filename = os.sep + filename
             try:
@@ -325,6 +330,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

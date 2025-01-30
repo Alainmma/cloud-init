@@ -9,7 +9,7 @@ import functools
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from cloudinit import safeyaml, util
+from cloudinit import lifecycle, safeyaml, util
 from cloudinit.net import (
     find_interface_name_from_mac,
     get_interfaces_by_mac,
@@ -47,6 +47,7 @@ NETWORK_V2_KEY_FILTER = [
     "set-name",
     "wakeonlan",
     "accept-ra",
+    "optional",
 ]
 
 NET_CONFIG_TO_V2: Dict[str, Dict[str, Any]] = {
@@ -86,18 +87,12 @@ NET_CONFIG_TO_V2: Dict[str, Dict[str, Any]] = {
 def warn_deprecated_all_devices(dikt: dict) -> None:
     """Warn about deprecations of v2 properties for all devices"""
     if "gateway4" in dikt or "gateway6" in dikt:
-        LOG.warning(
-            "DEPRECATED: The use of `gateway4` and `gateway6` is"
-            " deprecated. For more info check out: "
-            "https://cloudinit.readthedocs.io/en/latest/topics/network-config-format-v2.html"  # noqa: E501
+        lifecycle.deprecate(
+            deprecated="The use of `gateway4` and `gateway6`",
+            deprecated_version="22.4",
+            extra_message="For more info check out: "
+            "https://docs.cloud-init.io/en/latest/topics/network-config-format-v2.html",  # noqa: E501
         )
-
-
-def from_state_file(state_file):
-    state = util.read_conf(state_file)
-    nsi = NetworkStateInterpreter()
-    nsi.load(state)
-    return nsi
 
 
 def diff_keys(expected, actual):
@@ -127,25 +122,6 @@ def ensure_command_keys(required_keys):
         return decorator
 
     return wrapper
-
-
-class CommandHandlerMeta(type):
-    """Metaclass that dynamically creates a 'command_handlers' attribute.
-
-    This will scan the to-be-created class for methods that start with
-    'handle_' and on finding those will populate a class attribute mapping
-    so that those methods can be quickly located and called.
-    """
-
-    def __new__(cls, name, parents, dct):
-        command_handlers = {}
-        for attr_name, attr in dct.items():
-            if callable(attr) and attr_name.startswith("handle_"):
-                handles_what = attr_name[len("handle_") :]
-                if handles_what:
-                    command_handlers[handles_what] = attr
-        dct["command_handlers"] = command_handlers
-        return super(CommandHandlerMeta, cls).__new__(cls, name, parents, dct)
 
 
 class NetworkState:
@@ -234,8 +210,7 @@ class NetworkState:
         return cls({"config": network_state}, **kwargs)
 
 
-class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
-
+class NetworkStateInterpreter:
     initial_network_state = {
         "interfaces": {},
         "routes": [],
@@ -260,6 +235,21 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
         self._parsed = False
         self._interface_dns_map: dict = {}
         self._renderer = renderer
+        self.command_handlers = {
+            "bond": self.handle_bond,
+            "bonds": self.handle_bonds,
+            "bridge": self.handle_bridge,
+            "bridges": self.handle_bridges,
+            "ethernets": self.handle_ethernets,
+            "infiniband": self.handle_infiniband,
+            "loopback": self.handle_loopback,
+            "nameserver": self.handle_nameserver,
+            "physical": self.handle_physical,
+            "route": self.handle_route,
+            "vlan": self.handle_vlan,
+            "vlans": self.handle_vlans,
+            "wifis": self.handle_wifis,
+        }
 
     @property
     def network_state(self) -> NetworkState:
@@ -326,7 +316,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
                     "No handler found for  command '%s'" % command_type
                 ) from e
             try:
-                handler(self, command)
+                handler(command)
             except InvalidCommand:
                 if not skip_broken:
                     raise
@@ -347,7 +337,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
             if iface:
                 nameservers, search = dns
                 iface["dns"] = {
-                    "addresses": nameservers,
+                    "nameservers": nameservers,
                     "search": search,
                 }
 
@@ -368,7 +358,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
                     "No handler found for command '%s'" % command_type
                 ) from e
             try:
-                handler(self, command)
+                handler(command)
                 self._v2_common(command)
             except InvalidCommand:
                 if not skip_broken:
@@ -420,8 +410,12 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
         wakeonlan = command.get("wakeonlan", None)
         if wakeonlan is not None:
             wakeonlan = util.is_true(wakeonlan)
+        optional = command.get("optional", None)
+        if optional is not None:
+            optional = util.is_true(optional)
         iface.update(
             {
+                "config_id": command.get("config_id"),
                 "name": command.get("name"),
                 "type": command.get("type"),
                 "mac_address": command.get("mac_address"),
@@ -433,9 +427,11 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
                 "subnets": subnets,
                 "accept-ra": accept_ra,
                 "wakeonlan": wakeonlan,
+                "optional": optional,
             }
         )
-        self._network_state["interfaces"].update({command.get("name"): iface})
+        iface_key = command.get("config_id", command.get("name"))
+        self._network_state["interfaces"].update({iface_key: iface})
         self.dump_network_state()
 
     @ensure_command_keys(["name", "vlan_id", "vlan_link"])
@@ -559,7 +555,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
 
         # convert value to boolean
         bridge_stp = iface.get("bridge_stp")
-        if bridge_stp is not None and type(bridge_stp) != bool:
+        if bridge_stp is not None and not isinstance(bridge_stp, bool):
             if bridge_stp in ["on", "1", 1]:
                 bridge_stp = True
             elif bridge_stp in ["off", "0", 0]:
@@ -582,7 +578,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
         search = []
         if "address" in command:
             addrs = command["address"]
-            if not type(addrs) == list:
+            if not isinstance(addrs, list):
                 addrs = [addrs]
             for addr in addrs:
                 nameservers.append(addr)
@@ -650,7 +646,6 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
         self._handle_bond_bridge(command, cmd_type="bond")
 
     def handle_bridges(self, command):
-
         """
         v2_command = {
           br0: {
@@ -681,7 +676,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
           eno1:
             match:
               macaddress: 00:11:22:33:44:55
-              driver: hv_netsvc
+              driver: hv_netvsc
             wakeonlan: true
             dhcp4: true
             dhcp6: false
@@ -724,6 +719,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
 
         for eth, cfg in command.items():
             phy_cmd = {
+                "config_id": eth,
                 "type": "physical",
             }
             match = cfg.get("match", {})
@@ -756,7 +752,7 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
             driver = match.get("driver", None)
             if driver:
                 phy_cmd["params"] = {"driver": driver}
-            for key in ["mtu", "match", "wakeonlan", "accept-ra"]:
+            for key in ["mtu", "match", "wakeonlan", "accept-ra", "optional"]:
                 if key in cfg:
                     phy_cmd[key] = cfg[key]
 
@@ -812,27 +808,14 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
     def _v2_common(self, cfg) -> None:
         LOG.debug("v2_common: handling config:\n%s", cfg)
         for iface, dev_cfg in cfg.items():
-            if "set-name" in dev_cfg:
-                set_name_iface = dev_cfg.get("set-name")
-                if set_name_iface:
-                    iface = set_name_iface
             if "nameservers" in dev_cfg:
-                search = dev_cfg.get("nameservers").get("search", [])
-                dns = dev_cfg.get("nameservers").get("addresses", [])
+                search = dev_cfg.get("nameservers").get("search")
+                dns = dev_cfg.get("nameservers").get("addresses")
                 name_cmd = {"type": "nameserver"}
-                if len(search) > 0:
-                    name_cmd.update({"search": search})
-                if len(dns) > 0:
-                    name_cmd.update({"address": dns})
-                self.handle_nameserver(name_cmd)
-
-                mac_address: Optional[str] = dev_cfg.get("match", {}).get(
-                    "macaddress"
-                )
-                if mac_address:
-                    real_if_name = find_interface_name_from_mac(mac_address)
-                    if real_if_name:
-                        iface = real_if_name
+                if search:
+                    name_cmd["search"] = search
+                if dns:
+                    name_cmd["address"] = dns
 
                 self._handle_individual_nameserver(name_cmd, iface)
 
@@ -937,6 +920,8 @@ class NetworkStateInterpreter(metaclass=CommandHandlerMeta):
                     {
                         "destination": route.get("to"),
                         "gateway": route.get("via"),
+                        "metric": route.get("metric"),
+                        "mtu": route.get("mtu"),
                     }
                 )
             )
@@ -989,7 +974,7 @@ def _normalize_net_keys(network, address_keys=()):
 
     @returns: A dict containing normalized prefix and matching addr_key.
     """
-    net = dict((k, v) for k, v in network.items() if v)
+    net = {k: v for k, v in network.items() if v or v == 0}
     addr_key = None
     for key in address_keys:
         if net.get(key):
@@ -1126,6 +1111,3 @@ def parse_net_config_data(
         )
 
     return state
-
-
-# vi: ts=4 expandtab

@@ -21,7 +21,7 @@ def count_messages(root):
 class TestLaunchFilter(helpers.ResourceUsingTestCase):
     def assertCounts(self, message, expected_counts):
         orig_message = copy.deepcopy(message)
-        for (index, count) in expected_counts.items():
+        for index, count in expected_counts.items():
             index = util.safe_int(index)
             filtered_message = launch_index.Filter(index).apply(message)
             self.assertEqual(count_messages(filtered_message), count)
@@ -38,7 +38,7 @@ class TestLaunchFilter(helpers.ResourceUsingTestCase):
         msg1_msgs = [m for m in filterfalse(ud.is_skippable, msg1_msgs)]
         msg2_msgs = [m for m in msg2.walk()]
         msg2_msgs = [m for m in filterfalse(ud.is_skippable, msg2_msgs)]
-        for i in range(0, len(msg2_msgs)):
+        for i in range(len(msg2_msgs)):
             m1_msg = msg1_msgs[i]
             m2_msg = msg2_msgs[i]
             if m1_msg.get_charset() != m2_msg.get_charset():
@@ -129,6 +129,3 @@ class TestLaunchFilter(helpers.ResourceUsingTestCase):
             "1": 2,
         }
         self.assertCounts(message, expected_counts)
-
-
-# vi: ts=4 expandtab

@@ -8,12 +8,18 @@ the second one verifies if the module is working as expected if enabled.
 ``tests/cloud_tests/testcases/modules/ssh_auth_key_fingerprints_disable.yaml``,
 ``tests/cloud_tests/testcases/modules/ssh_auth_key_fingerprints_enable.yaml``.
 )"""
+
 import re
 
 import pytest
 
 from tests.integration_tests.decorators import retry
 from tests.integration_tests.instances import IntegrationInstance
+from tests.integration_tests.integration_settings import (
+    OS_IMAGE_TYPE,
+    PLATFORM,
+)
+from tests.integration_tests.util import HAS_CONSOLE_LOG, get_syslog_or_console
 
 USER_DATA_SSH_AUTHKEY_DISABLE = """\
 #cloud-config
@@ -36,7 +42,7 @@ class TestSshAuthkeyFingerprints:
     def test_ssh_authkey_fingerprints_disable(self, client):
         cloudinit_output = client.read_from_file("/var/log/cloud-init.log")
         assert (
-            "Skipping module named ssh-authkey-fingerprints, "
+            "Skipping module named ssh_authkey_fingerprints, "
             "logging of SSH fingerprints disabled" in cloudinit_output
         )
 
@@ -44,12 +50,14 @@ class TestSshAuthkeyFingerprints:
     # in syslog
     @retry(tries=30, delay=1)
     @pytest.mark.user_data(USER_DATA_SSH_AUTHKEY_ENABLE)
+    @pytest.mark.skipif(
+        OS_IMAGE_TYPE == "minimal" and not HAS_CONSOLE_LOG,
+        reason=f"No console_log available for minimal images on {PLATFORM}",
+    )
     def test_ssh_authkey_fingerprints_enable(self, client):
-        syslog_output = client.read_from_file("/var/log/syslog")
-
+        syslog_output = get_syslog_or_console(client)
         assert re.search(r"256 SHA256:.*(ECDSA)", syslog_output) is not None
         assert re.search(r"256 SHA256:.*(ED25519)", syslog_output) is not None
-        assert re.search(r"1024 SHA256:.*(DSA)", syslog_output) is None
         assert re.search(r"2048 SHA256:.*(RSA)", syslog_output) is None
 
 

@@ -37,7 +37,7 @@ For example the following could be present in
 
   network:
     version: 2
-    ethernets: []
+    ethernets: {}
 
 It may also be provided in other locations including the
 :ref:`datasource_nocloud`. See :ref:`network_config` for other places.
@@ -65,13 +65,13 @@ currently being defined.
 There are two physically/structurally different classes of device definitions,
 and the ID field has a different interpretation for each:
 
-Physical devices (e.g., ethernet, wifi)
----------------------------------------
+Physical devices (e.g., ethernet, Wi-Fi)
+----------------------------------------
 
 These can dynamically come and go between reboots and even during runtime
 (hotplugging). In the generic case, they can be selected by ``match:``
 rules on desired properties, such as name/name pattern, MAC address,
-driver, or device paths. In general these will match any number of
+or driver. In general these will match any number of
 devices (unless they refer to properties which are unique such as the full
 path or MAC address), so without further knowledge about the hardware,
 these will always be considered as a group.
@@ -149,18 +149,24 @@ Example: ::
     name: en*s0
 
 ``set-name: <(scalar)>``
-^^^^^^^^^^^^^^^^^^^^^^^^
+------------------------
 
-When matching on unique properties such as path or MAC, or with additional
-assumptions such as "there will only ever be one wifi device", match rules
-can be written so that they only match one device. Then this property can be
+When matching on unique properties such as MAC, match rules
+can be written so that they match only one device. Then this property can be
 used to give that device a more specific/desirable/nicer name than the default
 from udev’s ``ifnames``. Any additional device that satisfies the match rules
 will then fail to get renamed and keep the original kernel name (and dmesg
 will show an error).
 
+While multiple properties can be used in a match, ``macaddress`` is
+**required** for cloud-init to perform the rename.
+
+.. note::
+    On a netplan-based system, cloud-init will perform the rename
+    independently and prior to netplan.
+
 ``wakeonlan: <(bool)>``
-^^^^^^^^^^^^^^^^^^^^^^^
+-----------------------
 
 Enable wake on LAN. Off by default.
 
@@ -180,17 +186,17 @@ particular device definition. Default is ``networkd``.
    config to the instance.
 
 ``dhcp4: <(bool)>``
-^^^^^^^^^^^^^^^^^^^
+-------------------
 
 Enable DHCP for IPv4. Off by default.
 
 ``dhcp6: <(bool)>``
-^^^^^^^^^^^^^^^^^^^
+-------------------
 
 Enable DHCP for IPv6. Off by default.
 
 ``dhcp4-overrides and dhcp6-overrides: <(mapping)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+----------------------------------------------------
 
 DHCP behaviour overrides. Overrides will only have an effect if
 the corresponding DHCP type is enabled. Refer to `Netplan#dhcp-overrides`_
@@ -231,35 +237,43 @@ Example: ::
     use-routes: false
 
 ``addresses: <(sequence of scalars)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--------------------------------------
 
 Add static addresses to the interface in addition to the ones received
 through DHCP or RA. Each sequence entry is in CIDR notation, i.e., of the
-form ``addr/prefixlen``. ``addr`` is an IPv4 or IPv6 address as recognised
+form ``addr/prefixlen``. ``addr`` is an IPv4 or IPv6 address as recognized
 by ``inet_pton(3)`` and ``prefixlen`` the number of bits of the subnet.
 
 Example: ``addresses: [192.168.14.2/24, 2001:1::1/64]``
 
 ``gateway4: or gateway6: <(scalar)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+-------------------------------------
 
 Deprecated, see `Netplan#default-routes`_.
 Set default gateway for IPv4/6, for manual address configuration. This
 requires setting ``addresses`` too. Gateway IPs must be in a form
-recognised by ``inet_pton(3)``
+recognized by ``inet_pton(3)``
 
 Example for IPv4: ``gateway4: 172.16.0.1``
 Example for IPv6: ``gateway6: 2001:4::1``
 
 ``mtu: <MTU SizeBytes>``
-^^^^^^^^^^^^^^^^^^^^^^^^
+------------------------
 
 The MTU key represents a device's Maximum Transmission Unit, the largest size
 packet or frame, specified in octets (eight-bit bytes), that can be sent in a
 packet- or frame-based network. Specifying ``mtu`` is optional.
 
+``optional: <(bool)>``
+------------------------
+
+Mark a device as not required for booting. By default networkd will wait for
+all configured interfaces to be configured before continuing to boot. This
+option causes networkd to not wait for the interface. This is only supported
+by networkd. The default is false.
+
 ``nameservers: <(mapping)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+----------------------------
 
 Set DNS servers and search domains, for manual address configuration. There
 are two supported fields: ``addresses:`` is a list of IPv4 or IPv6 addresses
@@ -272,7 +286,7 @@ Example: ::
     addresses: [8.8.8.8, FEDC::1]
 
 ``routes: <(sequence of mapping)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+-----------------------------------
 
 Add device specific routes. Each mapping includes a ``to``, ``via`` key
 with an IPv4 or IPv6 address as value. ``metric`` is an optional value.
@@ -285,16 +299,16 @@ Example: ::
      metric: 3
 
 Ethernets
----------
+=========
 
 Ethernet device definitions do not support any specific properties beyond the
 common ones described above.
 
 Bonds
------
+=====
 
 ``interfaces: <(sequence of scalars)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+---------------------------------------
 
 All devices matching this ID list will be added to the bond.
 
@@ -309,7 +323,7 @@ Example: ::
       interfaces: [switchports]
 
 ``parameters: <(mapping)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+---------------------------
 
 Customisation parameters for special bonding options. Time values are
 specified in seconds unless otherwise specified.
@@ -450,10 +464,10 @@ value is ``1``. This option only affects ``balance-tlb`` and
 
 
 Bridges
--------
+=======
 
 ``interfaces: <(sequence of scalars)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+---------------------------------------
 
 All devices matching this ID list will be added to the bridge.
 
@@ -468,7 +482,7 @@ Example: ::
       interfaces: [switchports]
 
 ``parameters: <(mapping)>``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+---------------------------
 
 Customisation parameters for special bridging options. Time values are
 specified in seconds unless otherwise stated.
@@ -523,15 +537,15 @@ default value is "true", which means that Spanning Tree should be
 used.
 
 VLANs
------
+=====
 
 ``id: <(scalar)>``
-^^^^^^^^^^^^^^^^^^
+------------------
 
 VLAN ID, a number between 0 and 4094.
 
 ``link: <(scalar)>``
-^^^^^^^^^^^^^^^^^^^^
+--------------------
 
 ID of the underlying device definition on which this VLAN gets created.
 

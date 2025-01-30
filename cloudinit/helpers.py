@@ -9,13 +9,13 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import contextlib
+import logging
 import os
 from configparser import NoOptionError, NoSectionError, RawConfigParser
 from io import StringIO
 from time import time
 
-from cloudinit import log as logging
-from cloudinit import persistence, type_utils, util
+from cloudinit import persistence, settings, type_utils, util
 from cloudinit.settings import CFG_ENV_NAME, PER_ALWAYS, PER_INSTANCE, PER_ONCE
 
 LOG = logging.getLogger(__name__)
@@ -42,9 +42,6 @@ class DummySemaphores:
 
     def clear(self, _name, _freq):
         return True
-
-    def clear_all(self):
-        pass
 
 
 class FileLock:
@@ -83,14 +80,6 @@ class FileSemaphores:
             return False
         return True
 
-    def clear_all(self):
-        try:
-            util.del_dir(self.sem_path)
-        except (IOError, OSError):
-            util.logexc(
-                LOG, "Failed deleting semaphore directory %s", self.sem_path
-            )
-
     def _acquire(self, name, freq):
         # Check again if its been already gotten
         if self.has_run(name, freq):
@@ -115,23 +104,7 @@ class FileSemaphores:
         sem_file = self._get_path(cname, freq)
         # This isn't really a good atomic check
         # but it suffices for where and when cloudinit runs
-        if os.path.exists(sem_file):
-            return True
-
-        # this case could happen if the migrator module hadn't run yet
-        # but the item had run before we did canon_sem_name.
-        if cname != name and os.path.exists(self._get_path(name, freq)):
-            LOG.warning(
-                "%s has run without canonicalized name [%s].\n"
-                "likely the migrator has not yet run. "
-                "It will run next boot.\n"
-                "run manually with: cloud-init single --name=migrator",
-                name,
-                cname,
-            )
-            return True
-
-        return False
+        return os.path.exists(sem_file)
 
     def _get_path(self, name, freq):
         sem_path = self.sem_path
@@ -334,7 +307,10 @@ class Paths(persistence.CloudInitPickleMixin):
         self.cfgs = path_cfgs
         # Populate all the initial paths
         self.cloud_dir: str = path_cfgs.get("cloud_dir", "/var/lib/cloud")
-        self.run_dir: str = path_cfgs.get("run_dir", "/run/cloud-init")
+        self.docs_dir: str = path_cfgs.get(
+            "docs_dir", "/usr/share/doc/cloud-init/"
+        )
+        self.run_dir: str = path_cfgs.get("run_dir", settings.DEFAULT_RUN_DIR)
         self.instance_link: str = os.path.join(self.cloud_dir, "instance")
         self.boot_finished: str = os.path.join(
             self.instance_link, "boot-finished"
@@ -357,6 +333,8 @@ class Paths(persistence.CloudInitPickleMixin):
             # security-sensitive key values are present in this root-readable
             # file
             "instance_data_sensitive": "instance-data-sensitive.json",
+            "combined_cloud_config": "combined-cloud-config.json",
+            "network_config": "network-config.json",
             "instance_id": ".instance-id",
             "manual_clean_marker": "manual-clean",
             "obj_pkl": "obj.pkl",
@@ -372,6 +350,8 @@ class Paths(persistence.CloudInitPickleMixin):
             "vendor_cloud_config": "vendor-cloud-config.txt",
             "vendor_scripts": "scripts/vendor",
             "warnings": "warnings",
+            "hotplug.enabled": "hotplug.enabled",
+            ".skip-network": ".skip-network",
         }
         # Set when a datasource becomes active
         self.datasource = ds
@@ -390,9 +370,15 @@ class Paths(persistence.CloudInitPickleMixin):
         if "instance_data" not in self.lookups:
             self.lookups["instance_data"] = "instance-data.json"
         if "instance_data_sensitive" not in self.lookups:
-            self.lookups[
-                "instance_data_sensitive"
-            ] = "instance-data-sensitive.json"
+            self.lookups["instance_data_sensitive"] = (
+                "instance-data-sensitive.json"
+            )
+        if "combined_cloud_config" not in self.lookups:
+            self.lookups["combined_cloud_config"] = (
+                "combined-cloud-config.json"
+            )
+        if "hotplug.enabled" not in self.lookups:
+            self.lookups["hotplug.enabled"] = "hotplug.enabled"
 
     # get_ipath_cur: get the current instance path for an item
     def get_ipath_cur(self, name=None):
@@ -500,6 +486,3 @@ class DefaultingConfigParser(RawConfigParser):
         if header:
             contents = "\n".join([header, contents, ""])
         return contents
-
-
-# vi: ts=4 expandtab

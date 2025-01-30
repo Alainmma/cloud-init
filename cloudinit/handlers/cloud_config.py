@@ -8,11 +8,11 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
+
 import jsonpatch
 
-from cloudinit import handlers
-from cloudinit import log as logging
-from cloudinit import mergers, safeyaml, util
+from cloudinit import handlers, mergers, safeyaml, util
 from cloudinit.settings import PER_ALWAYS
 
 LOG = logging.getLogger(__name__)
@@ -36,9 +36,10 @@ MERGE_HEADER = "Merge-Type"
 # a: 22
 #
 # This gets loaded into yaml with final result {'a': 22}
-DEF_MERGERS = mergers.string_extract_mergers("dict(replace)+list()+str()")
 CLOUD_PREFIX = "#cloud-config"
 JSONP_PREFIX = "#cloud-config-jsonp"
+
+MERGED_PART_SCHEMA_ERROR_PREFIX = "# Cloud-config part ignored SCHEMA_ERROR: "
 
 
 class CloudConfigPartHandler(handlers.Handler):
@@ -53,6 +54,7 @@ class CloudConfigPartHandler(handlers.Handler):
         if "cloud_config_path" in _kwargs:
             self.cloud_fn = paths.get_ipath(_kwargs["cloud_config_path"])
         self.file_names = []
+        self.error_file_names = []
 
     def _write_cloud_config(self):
         if not self.cloud_fn:
@@ -66,6 +68,8 @@ class CloudConfigPartHandler(handlers.Handler):
                     fn = "?"
                 file_lines.append("# %s" % (fn))
             file_lines.append("")
+        for error_file in self.error_file_names:
+            file_lines.append(f"{MERGED_PART_SCHEMA_ERROR_PREFIX}{error_file}")
         if self.cloud_buf is not None:
             # Something was actually gathered....
             lines = [
@@ -98,7 +102,9 @@ class CloudConfigPartHandler(handlers.Handler):
         all_mergers.extend(mergers_yaml)
         all_mergers.extend(mergers_header)
         if not all_mergers:
-            all_mergers = DEF_MERGERS
+            all_mergers = mergers.string_extract_mergers(
+                "dict(replace)+list()+str()"
+            )
         return (payload_yaml, all_mergers)
 
     def _merge_patch(self, payload):
@@ -143,6 +149,7 @@ class CloudConfigPartHandler(handlers.Handler):
                 filename = filename.replace(i, " ")
             self.file_names.append(filename.strip())
         except ValueError as err:
+            self.error_file_names.append(filename.strip())
             LOG.warning(
                 "Failed at merging in cloud config part from %s: %s",
                 filename,
@@ -152,6 +159,3 @@ class CloudConfigPartHandler(handlers.Handler):
             util.logexc(
                 LOG, "Failed at merging in cloud config part from %s", filename
             )
-
-
-# vi: ts=4 expandtab

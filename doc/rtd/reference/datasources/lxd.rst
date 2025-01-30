@@ -3,15 +3,14 @@
 LXD
 ***
 
-The LXD datasource allows the user to provide custom user data,
-vendor data, metadata and network-config to the instance without running
+The LXD datasource allows the user to provide custom user-data,
+vendor-data, meta-data and network-config to the instance without running
 a network service (or even without having a network at all). This datasource
 performs HTTP GETs against the `LXD socket device`_ which is provided to each
 running LXD container and VM as ``/dev/lxd/sock`` and represents all
-instance-metadata as versioned HTTP routes such as:
+instance-meta-data as versioned HTTP routes such as:
 
   - 1.0/meta-data
-  - 1.0/config/user.meta-data
   - 1.0/config/user.vendor-data
   - 1.0/config/user.user-data
   - 1.0/config/user.<any-custom-key>
@@ -24,38 +23,41 @@ Disabling ``security.devlxd`` over the life of the container will result in
 warnings from ``cloud-init``, and ``cloud-init`` will keep the
 originally-detected LXD datasource.
 
-The LXD datasource is detected as viable by ``ds-identify`` during ``systemd``
-generator time when either ``/dev/lxd/sock`` exists, or
+The LXD datasource is detected as viable by ``ds-identify`` during the
+:ref:`detect stage<boot-Detect>` when either ``/dev/lxd/sock`` exists or
 ``/sys/class/dmi/id/board_name`` matches "LXD".
 
 The LXD datasource provides ``cloud-init`` with the ability to react to
-metadata, vendor data, user data and network-config changes, and to render the
+meta-data, vendor-data, user-data and network-config changes, and to render the
 updated configuration across a system reboot.
 
-To modify which metadata, vendor data or user data are provided to the
+To modify which meta-data, vendor-data or user-data are provided to the
 launched container, use either LXD profiles or
 ``lxc launch ... -c <key>="<value>"`` at initial container launch, by setting
 one of the following keys:
 
-- ``user.meta-data``: YAML metadata which will be appended to base metadata.
-- ``user.vendor-data``: YAML which overrides any metadata values.
-- ``user.network-config``: YAML representing either :ref:`network_config_v1` or
-  :ref:`network_config_v2` format.
-- ``user.user-data``: YAML which takes precedence and overrides both metadata
-  and vendor data values.
-- ``user.any-key``: Custom user configuration key and value pairs, which can be
-  passed to ``cloud-init``. Those keys/values will be present in instance-data
-  which can be used by both `#template: jinja` #cloud-config templates and
-  the :command:`cloud-init query` command.
+- ``cloud-init.vendor-data``: YAML which overrides any meta-data values.
+- ``cloud-init.network-config``: YAML representing either
+  :ref:`network_config_v1` or :ref:`network_config_v2` format.
+- ``cloud-init.user-data``: YAML which takes precedence and overrides both
+  meta-data and vendor-data values.
+- ``user.<any-key>``: Keys prefixed with ``user.`` are included in
+  :ref:`instance-data<instance-data>` under the ``ds.config`` key. These
+  key value pairs are used in jinja :ref:`cloud-config<jinja-config>`
+  and :ref:`user-data scripts<jinja-script>`. These key-value pairs may be
+  inspected on a launched instance using ``cloud-init query ds.config``.
 
 .. note::
-   LXD version 4.22 introduced a new scope of config keys prefaced by
-   ``cloud-init.``, which are preferred above the related ``user.*`` keys:
 
-   - ``cloud-init.meta-data``
-   - ``cloud-init.vendor-data``
-   - ``cloud-init.network-config``
-   - ``cloud-init.user-data``
+    Periods (.) and hyphens (-) in Jinja2 have special meaning. Keys which contain a
+    period or hyphen cannot use dot notation to access nested values. To support dot
+    notation, cloud-init provides an alias by converting each hyphen (-) and period (.)
+    character to an underscore (_). This means that an instance launched with
+    ``-c user.special-key=1FE321`` can be queried using standard jinja notation,
+    ``cloud-init query --format "{{ds.config['user.special-key']}}"`` or may use the alias
+    notation ``cloud-init query --format "{{ds.config.user_special_key}}"`` or
+    ``cloud-init query ds.config.user_special_key``.
+
 
 Configuration
 =============
@@ -81,7 +83,7 @@ Hotplug
 
 Network hotplug functionality is supported for the LXD datasource as described
 in the :ref:`events` documentation. As hotplug functionality relies on the
-cloud-provided network metadata, the LXD datasource will only meaningfully
+cloud-provided network meta-data, the LXD datasource will only meaningfully
 react to a hotplug event if it has the configuration necessary to respond to
 the change. Practically, this means that even with hotplug enabled, **the
 default behavior for adding a new virtual NIC will result in no change**.
@@ -111,4 +113,4 @@ DHCP configuration of ``eth1``:
     $ lxc config device add my-lxd eth1 nic name=eth1 nictype=bridged parent=my-bridge
     Device eth1 added to my-lxd
 
-.. _LXD socket device: https://linuxcontainers.org/lxd/docs/master/dev-lxd
+.. _LXD socket device: https://documentation.ubuntu.com/lxd/en/latest/dev-lxd/

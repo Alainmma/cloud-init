@@ -5,57 +5,20 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 """Fan: Configure ubuntu fan networking"""
 
-from logging import Logger
-from textwrap import dedent
+import logging
 
-from cloudinit import log as logging
 from cloudinit import subp, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 
-MODULE_DESCRIPTION = """\
-This module installs, configures and starts the ubuntu fan network system. For
-more information about Ubuntu Fan, see:
-``https://wiki.ubuntu.com/FanNetworking``.
-
-If cloud-init sees a ``fan`` entry in cloud-config it will:
-
-    - write ``config_path`` with the contents of the ``config`` key
-    - install the package ``ubuntu-fan`` if it is not installed
-    - ensure the service is started (or restarted if was previously running)
-
-Additionally, the ``ubuntu-fan`` package will be automatically installed
-if not present.
-"""
-
-distros = ["ubuntu"]
 meta: MetaSchema = {
     "id": "cc_fan",
-    "name": "Fan",
-    "title": "Configure ubuntu fan networking",
-    "description": MODULE_DESCRIPTION,
-    "distros": distros,
+    "distros": ["ubuntu"],
     "frequency": PER_INSTANCE,
-    "examples": [
-        dedent(
-            """\
-            fan:
-              config: |
-                # fan 240
-                10.0.0.0/8 eth0/16 dhcp
-                10.0.0.0/8 eth1/16 dhcp off
-                # fan 241
-                241.0.0.0/8 eth0/16 dhcp
-              config_path: /etc/network/fan
-            """
-        )
-    ],
     "activate_by_schema_keys": ["fan"],
 }
-
-__doc__ = get_meta_doc(meta)
 
 LOG = logging.getLogger(__name__)
 
@@ -87,9 +50,7 @@ def stop_update_start(distro, service, config_file, content):
     distro.manage_service("enable", service)
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     cfgin = cfg.get("fan")
     if not cfgin:
         cfgin = {}
@@ -110,6 +71,3 @@ def handle(
         config_file=mycfg.get("config_path"),
         content=mycfg.get("config"),
     )
-
-
-# vi: ts=4 expandtab

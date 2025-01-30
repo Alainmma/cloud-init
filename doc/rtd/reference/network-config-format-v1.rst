@@ -3,7 +3,7 @@
 Networking config Version 1
 ***************************
 
-This network configuration format lets users customise their instance's
+This network configuration format lets users customize their instance's
 networking interfaces by assigning subnet configuration, virtual device
 creation (bonds, bridges, VLANs) routes and DNS configuration.
 
@@ -15,15 +15,8 @@ Required elements of a `network config Version 1` are ``config`` and
 For example, the following could be present in
 :file:`/etc/cloud/cloud.cfg.d/custom-networking.cfg`:
 
-.. code-block:: yaml
-
-   network:
-     version: 1
-     config:
-     - type: physical
-       name: eth0
-       subnets:
-         - type: dhcp
+.. literalinclude:: ../../examples/network-config-v1-physical-dhcp.yaml
+   :language: yaml
 
 The :ref:`datasource_nocloud` datasource can also provide ``cloud-init``
 networking configuration in this format.
@@ -89,30 +82,18 @@ be sent in a packet- or frame-based network. Specifying ``mtu`` is optional.
    configuration time. It's possible to specify a value too large or to
    small for a device, and may be ignored by the device.
 
+``accept-ra: <boolean>``
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``accept-ra`` key is a boolean value that specifies whether or not to
+accept Router Advertisements (RA) for this interface. Specifying ``accept-ra``
+is optional.
+
 Physical example
 ^^^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       # Simple network adapter
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-       # Second nic with Jumbo frames
-       - type: physical
-         name: jumbo0
-         mac_address: 'aa:11:22:33:44:55'
-         mtu: 9000
-       # 10G pair
-       - type: physical
-         name: gbe0
-         mac_address: 'cd:11:22:33:44:00'
-       - type: physical
-         name: gbe1
-         mac_address: 'cd:11:22:33:44:02'
+.. literalinclude:: ../../examples/network-config-v1-physical-3-nic.yaml
+   :language: yaml
 
 Bond
 ----
@@ -205,29 +186,8 @@ Valid ``params`` keys are:
 Bond example
 ^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-    version: 1
-    config:
-      # Simple network adapter
-      - type: physical
-        name: interface0
-        mac_address: '00:11:22:33:44:55'
-      # 10G pair
-      - type: physical
-        name: gbe0
-        mac_address: 'cd:11:22:33:44:00'
-      - type: physical
-        name: gbe1
-        mac_address: 'cd:11:22:33:44:02'
-      - type: bond
-        name: bond0
-        bond_interfaces:
-          - gbe0
-          - gbe1
-        params:
-          bond-mode: active-backup
+.. literalinclude:: ../../examples/network-config-v1-bonded-pair.yaml
+   :language: yaml
 
 Bridge
 ------
@@ -260,38 +220,8 @@ Valid keys are:
 Bridge example
 ^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-    version: 1
-    config:
-      # Simple network adapter
-      - type: physical
-        name: interface0
-        mac_address: '00:11:22:33:44:55'
-      # Second nic with Jumbo frames
-      - type: physical
-        name: jumbo0
-        mac_address: 'aa:11:22:33:44:55'
-        mtu: 9000
-      - type: bridge
-        name: br0
-        bridge_interfaces:
-          - jumbo0
-        params:
-          bridge_ageing: 250
-          bridge_bridgeprio: 22
-          bridge_fd: 1
-          bridge_hello: 1
-          bridge_maxage: 10
-          bridge_maxwait: 0
-          bridge_pathcost:
-            - jumbo0 75
-          bridge_pathprio:
-            - jumbo0 28
-          bridge_stp: 'off'
-          bridge_maxwait:
-            - jumbo0 0
+.. literalinclude:: ../../examples/network-config-v1-bridge.yaml
+   :language: yaml
 
 VLAN
 ----
@@ -319,21 +249,8 @@ packet- or frame-based network.  Specifying ``mtu`` is optional.
 VLAN example
 ^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       # Physical interfaces.
-       - type: physical
-         name: eth0
-         mac_address: 'c0:d6:9f:2c:e8:80'
-       # VLAN interface.
-       - type: vlan
-         name: eth0.101
-         vlan_link: eth0
-         vlan_id: 101
-         mtu: 1500
+.. literalinclude:: ../../examples/network-config-v1-vlan.yaml
+   :language: yaml
 
 Nameserver
 ----------
@@ -342,8 +259,7 @@ Users can specify a ``nameserver`` type. Nameserver dictionaries include
 the following keys:
 
 - ``address``: List of IPv4 or IPv6 address of nameservers.
-- ``search``: List of hostnames to include in the :file:`resolv.conf` search
-  path.
+- ``search``: Optional. List of hostnames to include in the search path.
 - ``interface``: Optional. Ties the nameserver definition to the specified
   interface. The value specified here must match the ``name`` of an interface
   defined in this config. If unspecified, this nameserver will be considered
@@ -352,25 +268,8 @@ the following keys:
 Nameserver example
 ^^^^^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-            - type: static
-              address: 192.168.23.14/27
-              gateway: 192.168.23.1
-       - type: nameserver
-         interface: interface0  # Ties nameserver to interface0 only
-         address:
-           - 192.168.23.2
-           - 8.8.8.8
-         search:
-           - exemplary
+.. literalinclude:: ../../examples/network-config-v1-nameserver.yaml
+   :language: yaml
 
 Route
 -----
@@ -385,22 +284,8 @@ has the following keys:
 Route example
 ^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-            - type: static
-              address: 192.168.23.14/24
-              gateway: 192.168.23.1
-       - type: route
-         destination: 192.168.24.0/24
-         gateway: 192.168.24.1
-         metric: 3
+.. literalinclude:: ../../examples/network-config-v1-route.yaml
+   :language: yaml
 
 Subnet/IP
 ---------
@@ -417,11 +302,11 @@ Valid keys for ``subnets`` include the following:
   interface will be handled during boot.
 - ``address``: IPv4 or IPv6 address. It may include CIDR netmask notation.
 - ``netmask``: IPv4 subnet mask in dotted format or CIDR notation.
+- ``broadcast`` : IPv4 broadcast address in dotted format. This is
+  only rendered if :file:`/etc/network/interfaces` is used.
 - ``gateway``: IPv4 address of the default gateway for this subnet.
-- ``dns_nameservers``: Specify a list of IPv4 dns server IPs to end up in
-  :file:`resolv.conf`.
-- ``dns_search``: Specify a list of search paths to be included in
-  :file:`resolv.conf`.
+- ``dns_nameservers``: Specify a list of IPv4 DNS server IPs.
+- ``dns_search``: Specify a list of DNS search paths.
 - ``routes``: Specify a list of routes for a given interface.
 
 Subnet types are one of the following:
@@ -434,6 +319,7 @@ Subnet types are one of the following:
 - ``ipv6_dhcpv6-stateful``: Configure this interface with ``dhcp6``.
 - ``ipv6_dhcpv6-stateless``: Configure this interface with SLAAC and DHCP.
 - ``ipv6_slaac``: Configure address with SLAAC.
+- ``manual`` : Manual configure this interface.
 
 When making use of ``dhcp`` or either of the ``ipv6_dhcpv6`` types,
 no additional configuration is needed in the subnet dictionary.
@@ -448,37 +334,14 @@ servers. If you only want to discover the address, use ``ipv6_slaac``.
 Subnet DHCP example
 ^^^^^^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-           - type: dhcp
+.. literalinclude:: ../../examples/network-config-v1-subnet-dhcp.yaml
+   :language: yaml
 
 Subnet static example
 ^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-           - type: static
-             address: 192.168.23.14/27
-             gateway: 192.168.23.1
-             dns_nameservers:
-               - 192.168.23.2
-               - 8.8.8.8
-             dns_search:
-               - exemplary.maas
+.. literalinclude:: ../../examples/network-config-v1-subnet-static.yaml
+   :language: yaml
 
 Multiple subnet example
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -486,49 +349,14 @@ Multiple subnet example
 The following will result in an ``interface0`` using DHCP and ``interface0:1``
 using the static subnet configuration:
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-           - type: dhcp
-           - type: static
-             address: 192.168.23.14/27
-             gateway: 192.168.23.1
-             dns_nameservers:
-               - 192.168.23.2
-               - 8.8.8.8
-             dns_search:
-               - exemplary
+.. literalinclude:: ../../examples/network-config-v1-subnet-multiple.yaml
+   :language: yaml
 
 Subnet with routes example
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       - type: physical
-         name: interface0
-         mac_address: '00:11:22:33:44:55'
-         subnets:
-           - type: dhcp
-           - type: static
-             address: 10.184.225.122
-             netmask: 255.255.255.252
-             routes:
-               - gateway: 10.184.225.121
-                 netmask: 255.240.0.0
-                 network: 10.176.0.0
-               - gateway: 10.184.225.121
-                 netmask: 255.240.0.0
-                 network: 10.208.0.0
-
+.. literalinclude:: ../../examples/network-config-v1-subnet-routes.yaml
+   :language: yaml
 
 Multi-layered configurations
 ============================
@@ -540,107 +368,14 @@ supported allow specifying an underlying device by their ``name`` value.
 Bonded VLAN example
 -------------------
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-       # 10G pair
-       - type: physical
-         name: gbe0
-         mac_address: 'cd:11:22:33:44:00'
-       - type: physical
-         name: gbe1
-         mac_address: 'cd:11:22:33:44:02'
-       # Bond.
-       - type: bond
-         name: bond0
-         bond_interfaces:
-           - gbe0
-           - gbe1
-         params:
-           bond-mode: 802.3ad
-           bond-lacp-rate: fast
-       # A Bond VLAN.
-       - type: vlan
-           name: bond0.200
-           vlan_link: bond0
-           vlan_id: 200
-           subnets:
-               - type: dhcp4
+.. literalinclude:: ../../examples/network-config-v1-bonded-vlan.yaml
+   :language: yaml
 
 Multiple VLAN example
 ---------------------
 
-.. code-block::
-
-   network:
-     version: 1
-     config:
-     - id: eth0
-       mac_address: 'd4:be:d9:a8:49:13'
-       mtu: 1500
-       name: eth0
-       subnets:
-       - address: 10.245.168.16/21
-         dns_nameservers:
-         - 10.245.168.2
-         gateway: 10.245.168.1
-         type: static
-       type: physical
-     - id: eth1
-       mac_address: 'd4:be:d9:a8:49:15'
-       mtu: 1500
-       name: eth1
-       subnets:
-       - address: 10.245.188.2/24
-         dns_nameservers: []
-         type: static
-       type: physical
-     - id: eth1.2667
-       mtu: 1500
-       name: eth1.2667
-       subnets:
-       - address: 10.245.184.2/24
-         dns_nameservers: []
-         type: static
-       type: vlan
-       vlan_id: 2667
-       vlan_link: eth1
-     - id: eth1.2668
-       mtu: 1500
-       name: eth1.2668
-       subnets:
-       - address: 10.245.185.1/24
-         dns_nameservers: []
-         type: static
-       type: vlan
-       vlan_id: 2668
-       vlan_link: eth1
-     - id: eth1.2669
-       mtu: 1500
-       name: eth1.2669
-       subnets:
-       - address: 10.245.186.1/24
-         dns_nameservers: []
-         type: static
-       type: vlan
-       vlan_id: 2669
-       vlan_link: eth1
-     - id: eth1.2670
-       mtu: 1500
-       name: eth1.2670
-       subnets:
-       - address: 10.245.187.2/24
-         dns_nameservers: []
-         type: static
-       type: vlan
-       vlan_id: 2670
-       vlan_link: eth1
-     - address: 10.245.168.2
-       search:
-       - dellstack
-       type: nameserver
+.. literalinclude:: ../../examples/network-config-v1-multiple-vlan.yaml
+   :language: yaml
 
 .. _SLAAC: https://tools.ietf.org/html/rfc4862
 

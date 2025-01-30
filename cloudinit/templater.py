@@ -13,16 +13,22 @@
 # noqa: E402
 
 import collections
+import logging
 import re
 import sys
-from typing import Type
+from typing import Any
 
-from cloudinit import log as logging
+from jinja2 import TemplateSyntaxError
+
+from cloudinit import performance
 from cloudinit import type_utils as tu
 from cloudinit import util
 from cloudinit.atomic_helper import write_file
 
-JUndefined: Type
+# After bionic EOL, mypy==1.0.0 will be able to type-analyse dynamic
+# base types, substitute this by:
+# JUndefined: typing.Type
+JUndefined: Any
 try:
     from jinja2 import DebugUndefined as _DebugUndefined
     from jinja2 import Template as JTemplate
@@ -34,14 +40,53 @@ except (ImportError, AttributeError):
     JUndefined = object
 
 LOG = logging.getLogger(__name__)
-TYPE_MATCHER = re.compile(r"##\s*template:(.*)", re.I)
-BASIC_MATCHER = re.compile(r"\$\{([A-Za-z0-9_.]+)\}|\$([A-Za-z0-9_.]+)")
 MISSING_JINJA_PREFIX = "CI_MISSING_JINJA_VAR/"
+
+
+class JinjaSyntaxParsingException(TemplateSyntaxError):
+    def __init__(
+        self,
+        error: TemplateSyntaxError,
+    ) -> None:
+        super().__init__(
+            error.message or "unknown syntax error",
+            error.lineno,
+            error.name,
+            error.filename,
+        )
+        self.source = error.source
+
+    def __str__(self):
+        """Avoid jinja2.TemplateSyntaxError multi-line __str__ format."""
+        return self.format_error_message(
+            syntax_error=self.message,
+            line_number=self.lineno,
+            line_content=self.source.splitlines()[self.lineno - 2].strip(),
+        )
+
+    @staticmethod
+    def format_error_message(
+        syntax_error: str,
+        line_number: str,
+        line_content: str = "",
+    ) -> str:
+        """Avoid jinja2.TemplateSyntaxError multi-line __str__ format."""
+        line_content = f": {line_content}" if line_content else ""
+        return JinjaSyntaxParsingException.message_template.format(
+            syntax_error=syntax_error,
+            line_number=line_number,
+            line_content=line_content,
+        )
+
+    message_template = (
+        "Unable to parse Jinja template due to syntax error: "
+        "{syntax_error} on line {line_number}{line_content}"
+    )
 
 
 # Mypy, and the PEP 484 ecosystem in general, does not support creating
 # classes with dynamic base types: https://stackoverflow.com/a/59636248
-class UndefinedJinjaVariable(JUndefined):  # type: ignore
+class UndefinedJinjaVariable(JUndefined):
     """Class used to represent any undefined jinja template variable."""
 
     def __str__(self):
@@ -57,6 +102,7 @@ class UndefinedJinjaVariable(JUndefined):  # type: ignore
         )
 
 
+@performance.timed("Rendering basic template")
 def basic_render(content, params):
     """This does simple replacement of bash variable like templates.
 
@@ -92,29 +138,40 @@ def basic_render(content, params):
             )
         return str(selected_params[key])
 
-    return BASIC_MATCHER.sub(replacer, content)
+    return re.sub(
+        r"\$\{([A-Za-z0-9_.]+)\}|\$([A-Za-z0-9_.]+)", replacer, content
+    )
 
 
 def detect_template(text):
     def jinja_render(content, params):
         # keep_trailing_newline is in jinja2 2.7+, not 2.6
         add = "\n" if content.endswith("\n") else ""
-        return (
-            JTemplate(
-                content,
-                undefined=UndefinedJinjaVariable,
-                trim_blocks=True,
-                extensions=["jinja2.ext.do"],
-            ).render(**params)
-            + add
-        )
+        try:
+            with performance.Timed("Rendering jinja2 template"):
+                return (
+                    JTemplate(
+                        content,
+                        undefined=UndefinedJinjaVariable,
+                        trim_blocks=True,
+                        extensions=["jinja2.ext.do"],
+                    ).render(**params)
+                    + add
+                )
+        except TemplateSyntaxError as template_syntax_error:
+            template_syntax_error.lineno += 1
+            raise JinjaSyntaxParsingException(
+                error=template_syntax_error,
+            ) from template_syntax_error
+        except Exception as unknown_error:
+            raise unknown_error from unknown_error
 
     if text.find("\n") != -1:
-        ident, rest = text.split("\n", 1)
+        ident, rest = text.split("\n", 1)  # remove the first line
     else:
         ident = text
         rest = ""
-    type_match = TYPE_MATCHER.match(ident)
+    type_match = re.match(r"##\s*template:(.*)", ident, re.I)
     if not type_match:
         return ("basic", basic_render, text)
     else:
@@ -139,19 +196,13 @@ def detect_template(text):
 def render_from_file(fn, params):
     if not params:
         params = {}
-    template_type, renderer, content = detect_template(util.load_file(fn))
+    template_type, renderer, content = detect_template(util.load_text_file(fn))
     LOG.debug("Rendering content of '%s' using renderer %s", fn, template_type)
     return renderer(content, params)
 
 
 def render_to_file(fn, outfn, params, mode=0o644):
     contents = render_from_file(fn, params)
-    util.write_file(outfn, contents, mode=mode)
-
-
-def render_string_to_file(content, outfn, params, mode=0o644):
-    """Render string"""
-    contents = render_string(content, params)
     util.write_file(outfn, contents, mode=mode)
 
 
@@ -163,13 +214,16 @@ def render_string(content, params):
     return renderer(content, params)
 
 
-def render_cloudcfg(variant, template, output):
-
-    with open(template, "r") as fh:
-        contents = fh.read()
-    tpl_params = {"variant": variant}
+def render_template(variant, template, output, is_yaml, prefix=None):
+    contents = util.load_text_file(template)
+    tpl_params = {"variant": variant, "prefix": prefix}
     contents = (render_string(contents, tpl_params)).rstrip() + "\n"
-    util.load_yaml(contents)
+    if is_yaml:
+        out = util.load_yaml(contents, default=True)
+        if not out:
+            raise RuntimeError(
+                "Cannot render template file %s - invalid yaml." % template
+            )
     if output == "-":
         sys.stdout.write(contents)
     else:

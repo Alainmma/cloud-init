@@ -2,13 +2,39 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-import crypt
+import functools
+import logging
 import os
 import platform
+from typing import Any
 
 import cloudinit.distros.bsd
-from cloudinit import log as logging
 from cloudinit import subp, util
+
+try:
+    import crypt  # pylint: disable=W4901
+
+    salt = crypt.METHOD_BLOWFISH  # pylint: disable=E1101
+    blowfish_hash: Any = functools.partial(
+        crypt.crypt,
+        salt=crypt.mksalt(salt),
+    )
+except (ImportError, AttributeError):
+    try:
+        from passlib.hash import bcrypt
+
+        blowfish_hash = bcrypt.hash
+    except ImportError:
+
+        def blowfish_hash(_):
+            """Raise when called so that importing this module doesn't throw
+            ImportError when this module is not used. In this case, crypt
+            and passlib are not needed.
+            """
+            raise ImportError(
+                "crypt and passlib not found, missing dependency"
+            )
+
 
 LOG = logging.getLogger(__name__)
 
@@ -22,6 +48,17 @@ class NetBSD(cloudinit.distros.bsd.BSD):
 
     ci_sudoers_fn = "/usr/pkg/etc/sudoers.d/90-cloud-init-users"
     group_add_cmd_prefix = ["groupadd"]
+
+    # For NetBSD (from https://man.netbsd.org/passwd.5) a password field
+    # value of either "" or "*************" (13 "*") indicates no password,
+    # a password field prefixed with "*LOCKED*" indicates a locked
+    # password, and a password field of "*LOCKED*" followed by 13 "*"
+    # indicates a locked and blank password.
+    shadow_empty_locked_passwd_patterns = [
+        r"^{username}::",
+        r"^{username}:\*\*\*\*\*\*\*\*\*\*\*\*\*:",
+        r"^{username}:\*LOCKED\*\*\*\*\*\*\*\*\*\*\*\*\*\*:",
+    ]
 
     def __init__(self, name, cfg, paths):
         super().__init__(name, cfg, paths)
@@ -37,7 +74,12 @@ class NetBSD(cloudinit.distros.bsd.BSD):
     def _get_add_member_to_group_cmd(self, member_name, group_name):
         return ["usermod", "-G", group_name, member_name]
 
-    def add_user(self, name, **kwargs):
+    def add_user(self, name, **kwargs) -> bool:
+        """
+        Add a user to the system using standard tools
+
+        Returns False if user already exists, otherwise True.
+        """
         if util.is_user(name):
             LOG.info("User %s already exists, skipping.", name)
             return False
@@ -86,12 +128,14 @@ class NetBSD(cloudinit.distros.bsd.BSD):
         if passwd_val is not None:
             self.set_passwd(name, passwd_val, hashed=True)
 
+        # Indicate that a new user was created
+        return True
+
     def set_passwd(self, user, passwd, hashed=False):
         if hashed:
             hashed_pw = passwd
         else:
-            method = crypt.METHOD_BLOWFISH  # pylint: disable=E1101
-            hashed_pw = crypt.crypt(passwd, crypt.mksalt(method))
+            hashed_pw = blowfish_hash(passwd)
 
         try:
             subp.subp(["usermod", "-p", hashed_pw, user])
@@ -99,13 +143,6 @@ class NetBSD(cloudinit.distros.bsd.BSD):
             util.logexc(LOG, "Failed to set password for %s", user)
             raise
         self.unlock_passwd(user)
-
-    def force_passwd_change(self, user):
-        try:
-            subp.subp(["usermod", "-F", user])
-        except Exception:
-            util.logexc(LOG, "Failed to set pw expiration for %s", user)
-            raise
 
     def lock_passwd(self, name):
         try:
@@ -128,21 +165,16 @@ class NetBSD(cloudinit.distros.bsd.BSD):
         """Return env vars used in NetBSD package_command operations"""
         os_release = platform.release()
         os_arch = platform.machine()
-        e = os.environ.copy()
-        e[
-            "PKG_PATH"
-        ] = "http://cdn.netbsd.org/pub/pkgsrc/packages/NetBSD/%s/%s/All" % (
-            os_arch,
-            os_release,
-        )
-        return e
+        return {
+            "PKG_PATH": (
+                f"http://cdn.netbsd.org/pub/pkgsrc/packages/NetBSD"
+                f"/{os_arch}/{os_release}/All"
+            )
+        }
 
-    def update_package_sources(self):
+    def update_package_sources(self, *, force=False):
         pass
 
 
 class Distro(NetBSD):
     pass
-
-
-# vi: ts=4 expandtab

@@ -16,6 +16,7 @@ import pytest
 from cloudinit import dmi, helpers, safeyaml, settings, util
 from cloudinit.sources import DataSourceVMware
 from cloudinit.sources.helpers.vmware.imc import guestcust_util
+from cloudinit.subp import ProcessExecutionError
 from tests.unittests.helpers import (
     CiTestCase,
     FilesystemMockingTestCase,
@@ -62,6 +63,62 @@ runcmd:
 - echo "Hello, world."
 """
 
+VMW_IPV4_ROUTEINFO = {
+    "destination": "0.0.0.0",
+    "flags": "G",
+    "gateway": "10.85.130.1",
+    "genmask": "0.0.0.0",
+    "iface": "eth0",
+    "metric": "50",
+}
+VMW_IPV4_NETDEV_ADDR = {
+    "bcast": "10.85.130.255",
+    "ip": "10.85.130.116",
+    "mask": "255.255.255.0",
+    "scope": "global",
+}
+VMW_IPV4_NETIFACES_ADDR = {
+    "broadcast": "10.85.130.255",
+    "netmask": "255.255.255.0",
+    "addr": "10.85.130.116",
+}
+VMW_IPV6_ROUTEINFO = {
+    "destination": "::/0",
+    "flags": "UG",
+    "gateway": "2001:67c:1562:8007::1",
+    "iface": "eth0",
+    "metric": "50",
+}
+VMW_IPV6_NETDEV_ADDR = {
+    "ip": "fd42:baa2:3dd:17a:216:3eff:fe16:db54/64",
+    "scope6": "global",
+}
+VMW_IPV6_NETIFACES_ADDR = {
+    "netmask": "ffff:ffff:ffff:ffff::/64",
+    "addr": "fd42:baa2:3dd:17a:216:3eff:fe16:db54",
+}
+VMW_IPV6_NETDEV_PEER_ADDR = {
+    "ip": "fd42:baa2:3dd:17a:216:3eff:fe16:db54",
+    "scope6": "global",
+}
+VMW_IPV6_NETIFACES_PEER_ADDR = {
+    "netmask": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+    "addr": "fd42:baa2:3dd:17a:216:3eff:fe16:db54",
+}
+
+
+def generate_test_netdev_data(ipv4=None, ipv6=None):
+    ipv4 = ipv4 or []
+    ipv6 = ipv6 or []
+    return {
+        "eth0": {
+            "hwaddr": "00:16:3e:16:db:54",
+            "ipv4": ipv4,
+            "ipv6": ipv6,
+            "up": True,
+        },
+    }
+
 
 @pytest.fixture(autouse=True)
 def common_patches():
@@ -73,8 +130,8 @@ def common_patches():
             is_FreeBSD=mock.Mock(return_value=False),
         ),
         mock.patch(
-            "cloudinit.sources.DataSourceVMware.netifaces.interfaces",
-            return_value=[],
+            "cloudinit.netinfo.netdev_info",
+            return_value={},
         ),
         mock.patch(
             "cloudinit.sources.DataSourceVMware.getfqdn",
@@ -100,9 +157,28 @@ class TestDataSourceVMware(CiTestCase):
 
     def test_no_data_access_method(self):
         ds = get_ds(self.tmp)
-        ds.vmware_rpctool = None
-        ret = ds.get_data()
+        with mock.patch(
+            "cloudinit.sources.DataSourceVMware.is_vmware_platform",
+            return_value=False,
+        ):
+            ret = ds.get_data()
         self.assertFalse(ret)
+
+    def test_convert_to_netifaces_ipv4_format(self):
+        netifaces_format = DataSourceVMware.convert_to_netifaces_ipv4_format(
+            VMW_IPV4_NETDEV_ADDR
+        )
+        self.assertEqual(netifaces_format, VMW_IPV4_NETIFACES_ADDR)
+
+    def test_convert_to_netifaces_ipv6_format(self):
+        netifaces_format = DataSourceVMware.convert_to_netifaces_ipv6_format(
+            VMW_IPV6_NETDEV_ADDR
+        )
+        self.assertEqual(netifaces_format, VMW_IPV6_NETIFACES_ADDR)
+        netifaces_format = DataSourceVMware.convert_to_netifaces_ipv6_format(
+            VMW_IPV6_NETDEV_PEER_ADDR
+        )
+        self.assertEqual(netifaces_format, VMW_IPV6_NETIFACES_PEER_ADDR)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.get_default_ip_addrs")
     def test_get_host_info_ipv4(self, m_fn_ipaddr):
@@ -147,6 +223,124 @@ class TestDataSourceVMware(CiTestCase):
         self.assertTrue(
             host_info[DataSourceVMware.LOCAL_IPV6] == "2001:db8::::::8888"
         )
+
+    # TODO migrate this entire test suite to pytest then parameterize
+    @mock.patch("cloudinit.netinfo.route_info")
+    @mock.patch("cloudinit.netinfo.netdev_info")
+    def test_get_default_ip_addrs_ipv4only(
+        self,
+        m_netdev_info,
+        m_route_info,
+    ):
+        """Test get_default_ip_addrs use cases"""
+        m_route_info.return_value = {
+            "ipv4": [VMW_IPV4_ROUTEINFO],
+            "ipv6": [],
+        }
+        m_netdev_info.return_value = generate_test_netdev_data(
+            ipv4=[VMW_IPV4_NETDEV_ADDR]
+        )
+        ipv4, ipv6 = DataSourceVMware.get_default_ip_addrs()
+        self.assertEqual(ipv4, "10.85.130.116")
+        self.assertEqual(ipv6, None)
+
+    @mock.patch("cloudinit.netinfo.route_info")
+    @mock.patch("cloudinit.netinfo.netdev_info")
+    def test_get_default_ip_addrs_ipv6only(
+        self,
+        m_netdev_info,
+        m_route_info,
+    ):
+        m_route_info.return_value = {
+            "ipv4": [],
+            "ipv6": [VMW_IPV6_ROUTEINFO],
+        }
+        m_netdev_info.return_value = generate_test_netdev_data(
+            ipv6=[VMW_IPV6_NETDEV_ADDR]
+        )
+        ipv4, ipv6 = DataSourceVMware.get_default_ip_addrs()
+        self.assertEqual(ipv4, None)
+        self.assertEqual(ipv6, "fd42:baa2:3dd:17a:216:3eff:fe16:db54/64")
+
+    @mock.patch("cloudinit.netinfo.route_info")
+    @mock.patch("cloudinit.netinfo.netdev_info")
+    def test_get_default_ip_addrs_dualstack(
+        self,
+        m_netdev_info,
+        m_route_info,
+    ):
+        m_route_info.return_value = {
+            "ipv4": [VMW_IPV4_ROUTEINFO],
+            "ipv6": [VMW_IPV6_ROUTEINFO],
+        }
+        m_netdev_info.return_value = generate_test_netdev_data(
+            ipv4=[VMW_IPV4_NETDEV_ADDR],
+            ipv6=[VMW_IPV6_NETDEV_ADDR],
+        )
+        ipv4, ipv6 = DataSourceVMware.get_default_ip_addrs()
+        self.assertEqual(ipv4, "10.85.130.116")
+        self.assertEqual(ipv6, "fd42:baa2:3dd:17a:216:3eff:fe16:db54/64")
+
+    @mock.patch("cloudinit.netinfo.route_info")
+    @mock.patch("cloudinit.netinfo.netdev_info")
+    def test_get_default_ip_addrs_multiaddr(
+        self,
+        m_netdev_info,
+        m_route_info,
+    ):
+        m_route_info.return_value = {
+            "ipv4": [VMW_IPV4_ROUTEINFO],
+            "ipv6": [],
+        }
+        m_netdev_info.return_value = generate_test_netdev_data(
+            ipv4=[
+                VMW_IPV4_NETDEV_ADDR,
+                {
+                    "bcast": "10.85.131.255",
+                    "ip": "10.85.131.117",
+                    "mask": "255.255.255.0",
+                    "scope": "global",
+                },
+            ],
+            ipv6=[
+                VMW_IPV6_NETDEV_ADDR,
+                {
+                    "ip": "fe80::216:3eff:fe16:db54/64",
+                    "scope6": "link",
+                },
+            ],
+        )
+        ipv4, ipv6 = DataSourceVMware.get_default_ip_addrs()
+        self.assertEqual(ipv4, None)
+        self.assertEqual(ipv6, None)
+
+    @mock.patch("cloudinit.netinfo.route_info")
+    @mock.patch("cloudinit.netinfo.netdev_info")
+    def test_get_default_ip_addrs_nodefault(
+        self,
+        m_netdev_info,
+        m_route_info,
+    ):
+        m_route_info.return_value = {
+            "ipv4": [
+                {
+                    "destination": "185.125.188.0",
+                    "flags": "G",
+                    "gateway": "10.85.130.1",
+                    "genmask": "0.0.0.255",
+                    "iface": "eth0",
+                    "metric": "50",
+                },
+            ],
+            "ipv6": [],
+        }
+        m_netdev_info.return_value = generate_test_netdev_data(
+            ipv4=[VMW_IPV4_NETDEV_ADDR],
+            ipv6=[VMW_IPV6_NETDEV_ADDR],
+        )
+        ipv4, ipv6 = DataSourceVMware.get_default_ip_addrs()
+        self.assertEqual(ipv4, None)
+        self.assertEqual(ipv6, None)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.get_host_info")
     def test_wait_on_network(self, m_fn):
@@ -206,7 +400,7 @@ class TestDataSourceVMware(CiTestCase):
         logs = self.logs.getvalue()
         expected_logs = [
             "DEBUG: waiting on network: wait4=True, "
-            + "ready4=False, wait6=False, ready6=False\n",
+            "ready4=False, wait6=False, ready6=False\n",
             "DEBUG: waiting on network complete\n",
         ]
         for log in expected_logs:
@@ -234,7 +428,7 @@ class TestDataSourceVMwareEnvVars(FilesystemMockingTestCase):
 
     def tearDown(self):
         del os.environ[DataSourceVMware.VMX_GUESTINFO]
-        return super(TestDataSourceVMwareEnvVars, self).tearDown()
+        return super().tearDown()
 
     def create_system_files(self):
         rootd = self.tmp_dir()
@@ -248,7 +442,6 @@ class TestDataSourceVMwareEnvVars(FilesystemMockingTestCase):
 
     def assert_get_data_ok(self, m_fn, m_fn_call_count=6):
         ds = get_ds(self.tmp)
-        ds.vmware_rpctool = None
         ret = ds.get_data()
         self.assertTrue(ret)
         self.assertEqual(m_fn_call_count, m_fn.call_count)
@@ -377,7 +570,6 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
 
     def assert_get_data_ok(self, m_fn, m_fn_call_count=6):
         ds = get_ds(self.tmp)
-        ds.vmware_rpctool = "vmware-rpctool"
         ret = ds.get_data()
         self.assertTrue(ret)
         self.assertEqual(m_fn_call_count, m_fn.call_count)
@@ -396,7 +588,9 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
         self.assertEqual(system_type, PRODUCT_NAME)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_subplatform(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_subplatform(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         m_fn.side_effect = [VMW_METADATA_YAML, "", "", "", "", ""]
         ds = self.assert_get_data_ok(m_fn, m_fn_call_count=4)
         self.assertEqual(
@@ -409,17 +603,53 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
         )
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_userdata_only(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_with_vmware_rpctool(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
+        m_fn.side_effect = [VMW_METADATA_YAML, "", "", ""]
+        self.assert_get_data_ok(m_fn, m_fn_call_count=4)
+
+    @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
+    @mock.patch("cloudinit.sources.DataSourceVMware.exec_vmware_rpctool")
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_non_zero_exit_code_fallback_to_vmtoolsd(
+        self, m_which_fn, m_exec_vmware_rpctool_fn, m_fn
+    ):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
+        m_exec_vmware_rpctool_fn.side_effect = ProcessExecutionError(
+            exit_code=1
+        )
+        m_fn.side_effect = [VMW_METADATA_YAML, "", "", ""]
+        self.assert_get_data_ok(m_fn, m_fn_call_count=4)
+
+    @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
+    @mock.patch("cloudinit.sources.DataSourceVMware.exec_vmware_rpctool")
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_vmware_rpctool_not_found_fallback_to_vmtoolsd(
+        self, m_which_fn, m_exec_vmware_rpctool_fn, m_fn
+    ):
+        m_which_fn.side_effect = ["vmtoolsd", None]
+        m_fn.side_effect = [VMW_METADATA_YAML, "", "", ""]
+        self.assert_get_data_ok(m_fn, m_fn_call_count=4)
+
+    @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_userdata_only(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         m_fn.side_effect = ["", VMW_USERDATA_YAML, "", ""]
         self.assert_get_data_ok(m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_vendordata_only(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_vendordata_only(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         m_fn.side_effect = ["", "", VMW_VENDORDATA_YAML, ""]
         self.assert_get_data_ok(m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_metadata_single_ssh_key(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_metadata_single_ssh_key(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         metadata = DataSourceVMware.load_json_or_yaml(VMW_METADATA_YAML)
         metadata["public_keys"] = VMW_SINGLE_KEY
         metadata_yaml = safeyaml.dumps(metadata)
@@ -427,7 +657,9 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
         self.assert_metadata(metadata, m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_metadata_multiple_ssh_keys(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_metadata_multiple_ssh_keys(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         metadata = DataSourceVMware.load_json_or_yaml(VMW_METADATA_YAML)
         metadata["public_keys"] = VMW_MULTIPLE_KEYS
         metadata_yaml = safeyaml.dumps(metadata)
@@ -435,19 +667,25 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
         self.assert_metadata(metadata, m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_metadata_base64(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_base64(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         data = base64.b64encode(VMW_METADATA_YAML.encode("utf-8"))
         m_fn.side_effect = [data, "base64", "", ""]
         self.assert_get_data_ok(m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_metadata_b64(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_b64(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         data = base64.b64encode(VMW_METADATA_YAML.encode("utf-8"))
         m_fn.side_effect = [data, "b64", "", ""]
         self.assert_get_data_ok(m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_metadata_gzip_base64(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_gzip_base64(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         data = VMW_METADATA_YAML.encode("utf-8")
         data = gzip.compress(data)
         data = base64.b64encode(data)
@@ -455,7 +693,9 @@ class TestDataSourceVMwareGuestInfo(FilesystemMockingTestCase):
         self.assert_get_data_ok(m_fn, m_fn_call_count=4)
 
     @mock.patch("cloudinit.sources.DataSourceVMware.guestinfo_get_value")
-    def test_get_data_metadata_gz_b64(self, m_fn):
+    @mock.patch("cloudinit.sources.DataSourceVMware.which")
+    def test_get_data_metadata_gz_b64(self, m_which_fn, m_fn):
+        m_which_fn.side_effect = ["vmtoolsd", "vmware-rpctool"]
         data = VMW_METADATA_YAML.encode("utf-8")
         data = gzip.compress(data)
         data = base64.b64encode(data)
@@ -490,7 +730,6 @@ class TestDataSourceVMwareGuestInfo_InvalidPlatform(FilesystemMockingTestCase):
 
         m_fn.side_effect = [VMW_METADATA_YAML, "", "", "", "", ""]
         ds = get_ds(self.tmp)
-        ds.vmware_rpctool = "vmware-rpctool"
         ret = ds.get_data()
         self.assertFalse(ret)
 
@@ -1213,8 +1452,4 @@ def get_ds(temp_dir):
     ds = DataSourceVMware.DataSourceVMware(
         settings.CFG_BUILTIN, None, helpers.Paths({"run_dir": temp_dir})
     )
-    ds.vmware_rpctool = "vmware-rpctool"
     return ds
-
-
-# vi: ts=4 expandtab

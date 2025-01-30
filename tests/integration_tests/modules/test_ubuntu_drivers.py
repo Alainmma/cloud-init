@@ -3,7 +3,8 @@ import re
 import pytest
 
 from tests.integration_tests.clouds import IntegrationCloud
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.util import verify_clean_boot, verify_clean_log
 
 USER_DATA = """\
 #cloud-config
@@ -16,13 +17,14 @@ drivers:
 
 
 @pytest.mark.adhoc  # Expensive instance type
-@pytest.mark.oci
+@pytest.mark.skipif(PLATFORM != "oci", reason="Test is OCI specific")
 def test_ubuntu_drivers_installed(session_cloud: IntegrationCloud):
     with session_cloud.launch(
         launch_kwargs={"instance_type": "VM.GPU2.1"}, user_data=USER_DATA
     ) as client:
         log = client.read_from_file("/var/log/cloud-init.log")
         verify_clean_log(log)
+        verify_clean_boot(client)
         assert 1 == log.count(
             "Installing and activating NVIDIA drivers "
             "(nvidia/license-accepted=True, version=latest)"

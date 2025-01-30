@@ -4,8 +4,8 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-import pipes
 import re
+import shlex
 from io import StringIO
 
 # This library is used to parse/write
@@ -21,20 +21,19 @@ import configobj
 # or look at the 'param_expand()' function in the subst.c file in the bash
 # source tarball...
 SHELL_VAR_RULE = r"[a-zA-Z_]+[a-zA-Z0-9_]*"
-SHELL_VAR_REGEXES = [
-    # Basic variables
-    re.compile(r"\$" + SHELL_VAR_RULE),
-    # Things like $?, $0, $-, $@
-    re.compile(r"\$[0-9#\?\-@\*]"),
-    # Things like ${blah:1} - but this one
-    # gets very complex so just try the
-    # simple path
-    re.compile(r"\$\{.+\}"),
-]
 
 
 def _contains_shell_variable(text):
-    for r in SHELL_VAR_REGEXES:
+    for r in [
+        # Basic variables
+        re.compile(r"\$" + SHELL_VAR_RULE),
+        # Things like $?, $0, $-, $@
+        re.compile(r"\$[0-9#\?\-@\*]"),
+        # Things like ${blah:1} - but this one
+        # gets very complex so just try the
+        # simple path
+        re.compile(r"\$\{.+\}"),
+    ]:
         if r.search(text):
             return True
     return False
@@ -82,7 +81,7 @@ class SysConf(configobj.ConfigObj):
                 if re.search(r"[\t\r\n ]", value):
                     if _contains_shell_variable(value):
                         # If it contains shell variables then we likely want to
-                        # leave it alone since the pipes.quote function likes
+                        # leave it alone since the shlex.quote function likes
                         # to use single quotes which won't get expanded...
                         if re.search(r"[\n\"']", value):
                             quot_func = (
@@ -93,7 +92,7 @@ class SysConf(configobj.ConfigObj):
                                 lambda x: self._get_single_quote(x) % x
                             )  # noqa: E731
                     else:
-                        quot_func = pipes.quote
+                        quot_func = shlex.quote
         if not quot_func:
             return value
         return quot_func(value)
@@ -111,6 +110,3 @@ class SysConf(configobj.ConfigObj):
             val,
             cmnt,
         )
-
-
-# vi: ts=4 expandtab

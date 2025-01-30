@@ -32,10 +32,6 @@ class DataSourceNone(sources.DataSource):
     def get_instance_id(self):
         return "iid-datasource-none"
 
-    @property
-    def is_disconnected(self):
-        return True
-
 
 # Used to match classes to dependencies
 datasources = [
@@ -47,6 +43,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

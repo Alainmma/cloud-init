@@ -9,11 +9,11 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import errno
+import logging
 import os
+from functools import partial
 
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import sources, util
+from cloudinit import dmi, lifecycle, sources, util
 from cloudinit.net import eni
 
 LOG = logging.getLogger(__name__)
@@ -32,10 +32,21 @@ class DataSourceNoCloud(sources.DataSource):
         ]
         self.seed_dir = None
         self.supported_seed_starts = ("/", "file://")
+        self._network_config = None
+        self._network_eni = None
 
     def __str__(self):
-        root = sources.DataSource.__str__(self)
-        return "%s [seed=%s][dsmode=%s]" % (root, self.seed, self.dsmode)
+        """append seed and dsmode info when they contain non-default values"""
+        return (
+            super().__str__()
+            + " "
+            + (f"[seed={self.seed}]" if self.seed else "")
+            + (
+                f"[dsmode={self.dsmode}]"
+                if self.dsmode != sources.DSMODE_NETWORK
+                else ""
+            )
+        )
 
     def _get_devices(self, label):
         fslist = util.find_devs_with("TYPE=vfat")
@@ -65,7 +76,7 @@ class DataSourceNoCloud(sources.DataSource):
 
         try:
             # Parse the system serial label from dmi. If not empty, try parsing
-            # like the commandline
+            # like the command line
             md = {}
             serial = dmi.read_dmi_data("system-serial-number")
             if serial and load_cmdline_data(md, serial):
@@ -119,6 +130,12 @@ class DataSourceNoCloud(sources.DataSource):
 
         label = self.ds_cfg.get("fs_label", "cidata")
         if label is not None:
+            if label.lower() != "cidata":
+                lifecycle.deprecate(
+                    deprecated="Custom fs_label keys",
+                    deprecated_version="24.3",
+                    extra_message="This key isn't supported by ds-identify.",
+                )
             for dev in self._get_devices(label):
                 try:
                     LOG.debug("Attempting to use data from %s", dev)
@@ -165,7 +182,7 @@ class DataSourceNoCloud(sources.DataSource):
                     seedfound = proto
                     break
             if not seedfound:
-                LOG.debug("Seed from %s not supported by %s", seedfrom, self)
+                self._log_unusable_seedfrom(seedfrom)
                 return False
             # check and replace instances of known dmi.<dmi_keys> such as
             # chassis-serial-number or baseboard-product-name
@@ -173,7 +190,7 @@ class DataSourceNoCloud(sources.DataSource):
 
             # This could throw errors, but the user told us to do it
             # so if errors are raised, let them raise
-            (md_seed, ud, vd) = util.read_seeded(seedfrom, timeout=None)
+            md_seed, ud, vd, network = util.read_seeded(seedfrom, timeout=None)
             LOG.debug("Using seeded cache data from %s", seedfrom)
 
             # Values in the command line override those from the seed
@@ -182,6 +199,7 @@ class DataSourceNoCloud(sources.DataSource):
             )
             mydata["user-data"] = ud
             mydata["vendor-data"] = vd
+            mydata["network-config"] = network
             found.append(seedfrom)
 
         # Now that we have exhausted any other places merge in the defaults
@@ -209,12 +227,19 @@ class DataSourceNoCloud(sources.DataSource):
 
     @property
     def platform_type(self):
-        # Handle upgrade path of pickled ds
-        if not hasattr(self, "_platform_type"):
-            self._platform_type = None
         if not self._platform_type:
             self._platform_type = "lxd" if util.is_lxd() else "nocloud"
         return self._platform_type
+
+    def _log_unusable_seedfrom(self, seedfrom: str):
+        """Stage-specific level and message."""
+        LOG.info(
+            "%s only uses seeds starting with %s - will try to use %s "
+            "in the network stage.",
+            self,
+            self.supported_seed_starts,
+            seedfrom,
+        )
 
     def _get_cloud_name(self):
         """Return unknown when 'cloud-name' key is absent from metadata."""
@@ -247,6 +272,13 @@ class DataSourceNoCloud(sources.DataSource):
     def network_config(self):
         if self._network_config is None:
             if self._network_eni is not None:
+                lifecycle.deprecate(
+                    deprecated="Eni network configuration in NoCloud",
+                    deprecated_version="24.3",
+                    extra_message=(
+                        "You can use network v1 or network v2 instead"
+                    ),
+                )
                 self._network_config = eni.convert_eni_data(self._network_eni)
         return self._network_config
 
@@ -280,12 +312,25 @@ def load_cmdline_data(fill, cmdline=None):
         ("ds=nocloud-net", sources.DSMODE_NETWORK),
     ]
     for idstr, dsmode in pairs:
-        if parse_cmdline_data(idstr, fill, cmdline):
+        if not parse_cmdline_data(idstr, fill, cmdline):
+            continue
+        if "dsmode" in fill:
             # if dsmode was explicitly in the command line, then
-            # prefer it to the dsmode based on the command line id
-            if "dsmode" not in fill:
-                fill["dsmode"] = dsmode
+            # prefer it to the dsmode based on seedfrom type
             return True
+
+        seedfrom = fill.get("seedfrom")
+        if seedfrom:
+            if seedfrom.startswith(
+                ("http://", "https://", "ftp://", "ftps://")
+            ):
+                fill["dsmode"] = sources.DSMODE_NETWORK
+            elif seedfrom.startswith(("file://", "/")):
+                fill["dsmode"] = sources.DSMODE_LOCAL
+        else:
+            fill["dsmode"] = dsmode
+
+        return True
     return False
 
 
@@ -355,7 +400,68 @@ def _merge_new_seed(cur, seeded):
 class DataSourceNoCloudNet(DataSourceNoCloud):
     def __init__(self, sys_cfg, distro, paths):
         DataSourceNoCloud.__init__(self, sys_cfg, distro, paths)
-        self.supported_seed_starts = ("http://", "https://")
+        self.supported_seed_starts = (
+            "http://",
+            "https://",
+            "ftp://",
+            "ftps://",
+        )
+
+    def _log_unusable_seedfrom(self, seedfrom: str):
+        """Stage-specific level and message."""
+        LOG.warning(
+            "%s only uses seeds starting with %s - %s is not valid.",
+            self,
+            self.supported_seed_starts,
+            seedfrom,
+        )
+
+    def ds_detect(self):
+        """Check dmi and kernel command line for dsname
+
+        NoCloud historically used "nocloud-net" as its dsname
+        for network timeframe (DEP_NETWORK), which supports http(s) urls.
+        For backwards compatiblity, check for that dsname.
+        """
+        log_deprecated = partial(
+            lifecycle.deprecate,
+            deprecated="The 'nocloud-net' datasource name",
+            deprecated_version="24.1",
+            extra_message=(
+                "Use 'nocloud' instead, which uses the seedfrom protocol"
+                "scheme (http// or file://) to decide how to run."
+            ),
+        )
+
+        if "nocloud-net" == sources.parse_cmdline():
+            log_deprecated()
+            return True
+
+        serial = sources.parse_cmdline_or_dmi(
+            dmi.read_dmi_data("system-serial-number") or ""
+        ).lower()
+
+        if serial in (self.dsname.lower(), "nocloud-net"):
+            LOG.debug(
+                "Machine is configured by dmi serial number to run on "
+                "single datasource %s.",
+                self,
+            )
+            if serial == "nocloud-net":
+                log_deprecated()
+            return True
+        elif (
+            self.sys_cfg.get("datasource", {})
+            .get("NoCloud", {})
+            .get("seedfrom")
+        ):
+            LOG.debug(
+                "Machine is configured by system configuration to run on "
+                "single datasource %s.",
+                self,
+            )
+            return True
+        return False
 
 
 # Used to match classes to dependencies
@@ -370,4 +476,13 @@ def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
 
 
-# vi: ts=4 expandtab
+if __name__ == "__main__":
+    from sys import argv
+
+    logging.basicConfig(level=logging.DEBUG)
+    seedfrom = argv[1]
+    md_seed, ud, vd, network = util.read_seeded(seedfrom)
+    print(f"seeded: {md_seed}")
+    print(f"ud: {ud}")
+    print(f"vd: {vd}")
+    print(f"network: {network}")

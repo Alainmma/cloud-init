@@ -42,7 +42,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         m_user.assert_not_called()
         m_group.assert_not_called()
 
@@ -62,7 +62,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         self.assertCountEqual(
             m_user.call_args_list,
             [
@@ -97,6 +97,7 @@ class TestHandleUsersGroups(CiTestCase):
                 "lock_passwd": True,
                 "groups": ["wheel"],
                 "shell": "/bin/tcsh",
+                "homedir": "/home/freebsd",
             }
         }
         metadata = {}
@@ -107,7 +108,7 @@ class TestHandleUsersGroups(CiTestCase):
             cloud = self.tmp_cloud(
                 distro="freebsd", sys_cfg=sys_cfg, metadata=metadata
             )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         self.assertCountEqual(
             m_fbsd_user.call_args_list,
             [
@@ -116,6 +117,7 @@ class TestHandleUsersGroups(CiTestCase):
                     groups="wheel",
                     lock_passwd=True,
                     shell="/bin/tcsh",
+                    homedir="/home/freebsd",
                 ),
                 mock.call("me2", uid=1234, default=False),
             ],
@@ -142,7 +144,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         self.assertCountEqual(
             m_user.call_args_list,
             [
@@ -183,7 +185,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         self.assertCountEqual(
             m_user.call_args_list,
             [
@@ -216,7 +218,7 @@ class TestHandleUsersGroups(CiTestCase):
         }
         cloud = self.tmp_cloud(distro="ubuntu", sys_cfg={}, metadata={})
         with self.assertRaises(ValueError) as context_manager:
-            cc_users_groups.handle("modulename", cfg, cloud, None, None)
+            cc_users_groups.handle("modulename", cfg, cloud, None)
         m_group.assert_not_called()
         self.assertEqual(
             "Not creating user me2. Key(s) ssh_import_id cannot be provided"
@@ -246,7 +248,7 @@ class TestHandleUsersGroups(CiTestCase):
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
         with self.assertRaises(ValueError) as context_manager:
-            cc_users_groups.handle("modulename", cfg, cloud, None, None)
+            cc_users_groups.handle("modulename", cfg, cloud, None)
         m_group.assert_not_called()
         self.assertEqual(
             "Not creating user me2. Invalid value of ssh_redirect_user:"
@@ -270,7 +272,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         self.assertCountEqual(
             m_user.call_args_list,
             [
@@ -296,7 +298,7 @@ class TestHandleUsersGroups(CiTestCase):
         cloud = self.tmp_cloud(
             distro="ubuntu", sys_cfg=sys_cfg, metadata=metadata
         )
-        cc_users_groups.handle("modulename", cfg, cloud, None, None)
+        cc_users_groups.handle("modulename", cfg, cloud, None)
         m_user.assert_called_once_with("me2", default=False)
         m_group.assert_not_called()
         self.assertEqual(
@@ -337,7 +339,10 @@ class TestUsersGroupsSchema:
                 {"users": [{"name": "bbsw", "garbage-key": None}]},
                 pytest.raises(
                     SchemaValidationError,
-                    match="is not valid under any of the given schemas",
+                    match=(
+                        "users.0: {'name': 'bbsw', 'garbage-key': None} is"
+                        " not of type 'string'"
+                    ),
                 ),
                 True,
             ),
@@ -358,16 +363,34 @@ class TestUsersGroupsSchema:
             ({"users": "oldstyle,default"}, does_not_raise(), None),
             ({"users": ["default"]}, does_not_raise(), None),
             ({"users": ["default", ["aaa", "bbb"]]}, does_not_raise(), None),
-            # no default user creation
+            # no user creation at all
+            ({"users": []}, does_not_raise(), None),
+            # different default user creation
             ({"users": ["foobar"]}, does_not_raise(), None),
             (
                 {"users": [{"name": "bbsw", "lock-passwd": True}]},
                 pytest.raises(
                     SchemaValidationError,
                     match=(
-                        "users.0.lock-passwd: DEPRECATED."
-                        " Dropped after April 2027. Use ``lock_passwd``."
-                        " Default: ``true``"
+                        re.escape(
+                            "Cloud config schema deprecations: "
+                            "users.0.lock-passwd:  Deprecated in version 22.3."
+                            " Use **lock_passwd** instead."
+                        )
+                    ),
+                ),
+                False,
+            ),
+            (
+                {"users": [{"name": "bbsw", "no-create-home": True}]},
+                pytest.raises(
+                    SchemaValidationError,
+                    match=(
+                        re.escape(
+                            "Cloud config schema deprecations: "
+                            "users.0.no-create-home:  Deprecated in version"
+                            " 24.2. Use **no_create_home** instead."
+                        )
                     ),
                 ),
                 False,
@@ -387,10 +410,11 @@ class TestUsersGroupsSchema:
                 pytest.raises(
                     SchemaValidationError,
                     match=(
-                        "Cloud config schema deprecations: users.0.groups.adm:"
-                        " DEPRECATED. When providing an object for"
-                        " users.groups the ``<group_name>`` keys are the"
-                        " groups to add this user to,"
+                        "Cloud config schema deprecations: "
+                        "users.0.groups.adm:  Deprecated in version 23.1. "
+                        "The use of ``object`` type is deprecated. Use "
+                        "``string`` or ``array`` of ``string`` instead., "
+                        "users.0.groups.sudo:  Deprecated in version 23.1."
                     ),
                 ),
                 False,
@@ -400,7 +424,9 @@ class TestUsersGroupsSchema:
                 {"user": ["no_list_allowed"]},
                 pytest.raises(
                     SchemaValidationError,
-                    match=re.escape("user: ['no_list_allowed'] is not valid "),
+                    match=re.escape(
+                        "user: ['no_list_allowed'] is not of type 'string'"
+                    ),
                 ),
                 True,
             ),
@@ -418,7 +444,10 @@ class TestUsersGroupsSchema:
                 },
                 pytest.raises(
                     SchemaValidationError,
-                    match="errors: users.0: {'inactive': True",
+                    match=(
+                        "errors: users.0.inactive: True is not of type"
+                        " 'string'"
+                    ),
                 ),
                 True,
             ),
@@ -440,10 +469,8 @@ class TestUsersGroupsSchema:
                 pytest.raises(
                     SchemaValidationError,
                     match=(
-                        "deprecations: user.groups.sbuild: DEPRECATED. "
-                        "When providing an object for users.groups the "
-                        "``<group_name>`` keys are the groups to add this "
-                        "user to"
+                        "Cloud config schema deprecations: "
+                        "user.groups.sbuild:  Deprecated in version 23.1."
                     ),
                 ),
                 False,
@@ -453,9 +480,10 @@ class TestUsersGroupsSchema:
                 pytest.raises(
                     SchemaValidationError,
                     match=(
-                        "deprecations: user.sudo: DEPRECATED. The value"
-                        " ``false`` will be dropped after April 2027."
-                        " Use ``null`` or no ``sudo`` key instead."
+                        "Cloud config schema deprecations: user.sudo:"
+                        "  Changed in version 22.2. The value "
+                        "``false`` is deprecated for this key, use "
+                        "``null`` instead."
                     ),
                 ),
                 False,
@@ -470,9 +498,10 @@ class TestUsersGroupsSchema:
                 pytest.raises(
                     SchemaValidationError,
                     match=(
-                        "users.0.uid: DEPRECATED. The use of ``string`` type"
-                        " will be dropped after April 2027. Use an ``integer``"
-                        " instead."
+                        "Cloud config schema deprecations: "
+                        "users.0.uid:  Changed in version 22.3. The "
+                        "use of ``string`` type is deprecated. Use "
+                        "an ``integer`` instead."
                     ),
                 ),
                 False,
@@ -481,12 +510,41 @@ class TestUsersGroupsSchema:
                 {"users": [{"name": "a", "expiredate": "2038,1,19"}]},
                 pytest.raises(
                     SchemaValidationError,
-                    match=(
-                        "users.0: {'name': 'a', 'expiredate': '2038,1,19'}"
-                        " is not valid under any of the given schemas"
-                    ),
+                    match=("users.0.expiredate: '2038,1,19' is not a 'date'"),
                 ),
                 True,
+            ),
+            (
+                {
+                    "users": [
+                        {
+                            "name": "lima",
+                            "uid": "1000",
+                            "homedir": "/home/lima.linux",
+                            "shell": "/bin/bash",
+                            "sudo": "ALL=(ALL) NOPASSWD:ALL",
+                            "lock_passwd": True,
+                            "ssh-authorized-keys": ["ssh-ed25519 ..."],
+                        }
+                    ]
+                },
+                pytest.raises(
+                    SchemaValidationError,
+                    match=(
+                        re.escape(
+                            "Cloud config schema deprecations: "
+                            "users.0.ssh-authorized-keys: "
+                            " Deprecated in version 18.3."
+                            " Use **ssh_authorized_keys** instead."
+                            ", "
+                            "users.0.uid: "
+                            " Changed in version 22.3."
+                            " The use of ``string`` type is deprecated."
+                            " Use an ``integer`` instead."
+                        )
+                    ),
+                ),
+                False,
             ),
         ],
     )

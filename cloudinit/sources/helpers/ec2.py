@@ -8,8 +8,8 @@
 
 import functools
 import json
+import logging
 
-from cloudinit import log as logging
 from cloudinit import url_helper, util
 
 LOG = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class MetadataMaterializer:
             child_blob = self._caller(child_url)
             child_contents[c] = self._materialize(child_blob, child_url)
         leaf_contents = {}
-        for (field, resource) in leaves.items():
+        for field, resource in leaves.items():
             leaf_url = url_helper.combine_url(base_url, resource)
             leaf_blob = self._caller(leaf_url)
             leaf_contents[field] = self._leaf_decoder(field, leaf_blob)
@@ -135,7 +135,7 @@ class MetadataMaterializer:
         return joined
 
 
-def skip_retry_on_codes(status_codes, _request_args, cause):
+def skip_retry_on_codes(status_codes, cause):
     """Returns False if cause.code is in status_codes."""
     return cause.code not in status_codes
 
@@ -143,6 +143,7 @@ def skip_retry_on_codes(status_codes, _request_args, cause):
 def get_instance_userdata(
     api_version="latest",
     metadata_address="http://169.254.169.254",
+    *,
     ssl_details=None,
     timeout=5,
     retries=5,
@@ -152,7 +153,7 @@ def get_instance_userdata(
 ):
     ud_url = url_helper.combine_url(metadata_address, api_version)
     ud_url = url_helper.combine_url(ud_url, "user-data")
-    user_data = ""
+    user_data = b""
     try:
         if not exception_cb:
             # It is ok for userdata to not exist (thats why we are stopping if
@@ -282,6 +283,3 @@ def get_instance_identity(
         headers_cb=headers_cb,
         exception_cb=exception_cb,
     )
-
-
-# vi: ts=4 expandtab

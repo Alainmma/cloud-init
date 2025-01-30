@@ -9,11 +9,10 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import abc
+import logging
 import os
 
-from cloudinit import importer
-from cloudinit import log as logging
-from cloudinit import type_utils, util
+from cloudinit import importer, type_utils, util
 from cloudinit.settings import FREQUENCIES, PER_ALWAYS, PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ INCLUSION_TYPES_MAP = {
     "## template: jinja": "text/jinja2",
     # Note: for the next 3 entries, the prefix doesn't matter because these
     # are for types that can only be used as part of a MIME message. However,
-    # including these entries supresses warnings during `cloudinit devel
+    # including these entries suppresses warnings during `cloudinit devel
     # make-mime`, which otherwise would require `--force`.
     "text/x-shellscript-per-boot": "text/x-shellscript-per-boot",
     "text/x-shellscript-per-instance": "text/x-shellscript-per-instance",
@@ -94,7 +93,7 @@ def run_part(mod, data, filename, payload, frequency, headers):
         or (frequency == PER_INSTANCE and mod_freq == PER_INSTANCE)
     ):
         return
-    # Sanity checks on version (should be an int convertable)
+    # Sanity checks on version (should be an int convertible)
     try:
         mod_ver = mod.handler_version
         mod_ver = int(mod_ver)
@@ -299,6 +298,3 @@ def type_from_starts_with(payload, default=None):
         if payload_lc.startswith(text):
             return INCLUSION_TYPES_MAP[text]
     return default
-
-
-# vi: ts=4 expandtab

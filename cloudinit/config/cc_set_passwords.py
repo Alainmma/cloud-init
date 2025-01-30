@@ -7,92 +7,29 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 """Set Passwords: Set user passwords and enable/disable SSH password auth"""
 
+import logging
+import random
 import re
-from logging import Logger
-from string import ascii_letters, digits
-from textwrap import dedent
+import string
 from typing import List
 
-from cloudinit import features
-from cloudinit import log as logging
-from cloudinit import subp, util
+from cloudinit import features, lifecycle, subp, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.distros import ALL_DISTROS, Distro, ug_util
+from cloudinit.log import log_util
 from cloudinit.settings import PER_INSTANCE
 from cloudinit.ssh_util import update_ssh_config
 
-MODULE_DESCRIPTION = """\
-This module consumes three top-level config keys: ``ssh_pwauth``, ``chpasswd``
-and ``password``.
-
-The ``ssh_pwauth`` config key determines whether or not sshd will be configured
-to accept password authentication.
-
-The ``chpasswd`` config key accepts a dictionary containing either or both of
-``users`` and ``expire``. The ``users`` key is used to assign a password to a
-corresponding pre-existing user. The ``expire`` key is used to set
-whether to expire all user passwords specified by this module,
-such that a password will need to be reset on the user's next login.
-
-.. note::
-    Prior to cloud-init 22.3, the ``expire`` key only applies to plain text
-    (including ``RANDOM``) passwords. Post 22.3, the ``expire`` key applies to
-    both plain text and hashed passwords.
-
-``password`` config key is used to set the default user's password. It is
-ignored if the ``chpasswd`` ``users`` is used. Note: the ``list`` keyword is
-deprecated in favor of ``users``.
-"""
-
 meta: MetaSchema = {
     "id": "cc_set_passwords",
-    "name": "Set Passwords",
-    "title": "Set user passwords and enable/disable SSH password auth",
-    "description": MODULE_DESCRIPTION,
     "distros": [ALL_DISTROS],
     "frequency": PER_INSTANCE,
-    "examples": [
-        dedent(
-            """\
-            # Set a default password that would need to be changed
-            # at first login
-            ssh_pwauth: true
-            password: password1
-            """
-        ),
-        dedent(
-            """\
-            # Disable ssh password authentication
-            # Don't require users to change their passwords on next login
-            # Set the password for user1 to be 'password1' (OS does hashing)
-            # Set the password for user2 to a pre-hashed password
-            # Set the password for user3 to be a randomly generated password,
-            #   which will be written to the system console
-            ssh_pwauth: false
-            chpasswd:
-              expire: false
-              users:
-                - name: user1
-                  password: password1
-                  type: text
-                - name: user2
-                  password: $6$rounds=4096$5DJ8a9WMTEzIo5J4$Yms6imfeBvf3Yfu84mQBerh18l7OR1Wm1BJXZqFSpJ6BVas0AYJqIjP7czkOaAZHZi1kxQ5Y1IhgWN8K9NgxR1
-                - name: user3
-                  type: RANDOM
-            """  # noqa
-        ),
-    ],
     "activate_by_schema_keys": [],
 }
 
-__doc__ = get_meta_doc(meta)
-
 LOG = logging.getLogger(__name__)
-
-# We are removing certain 'painful' letters/numbers
-PW_SET = "".join([x for x in ascii_letters + digits if x not in "loLOI01"])
 
 
 def get_users_by_type(users_list: list, pw_type: str) -> list:
@@ -108,6 +45,18 @@ def get_users_by_type(users_list: list, pw_type: str) -> list:
     )
 
 
+def _restart_ssh_daemon(distro: Distro, service: str, *extra_args: str):
+    try:
+        distro.manage_service("restart", service, *extra_args)
+        LOG.debug("Restarted the SSH daemon.")
+    except subp.ProcessExecutionError as e:
+        LOG.warning(
+            "'ssh_pwauth' configuration may not be applied. Cloud-init was "
+            "unable to restart SSH daemon due to error: '%s'",
+            e,
+        )
+
+
 def handle_ssh_pwauth(pw_auth, distro: Distro):
     """Apply sshd PasswordAuthentication changes.
 
@@ -121,10 +70,10 @@ def handle_ssh_pwauth(pw_auth, distro: Distro):
     cfg_name = "PasswordAuthentication"
 
     if isinstance(pw_auth, str):
-        LOG.warning(
-            "DEPRECATION: The 'ssh_pwauth' config key should be set to "
-            "a boolean value. The string format is deprecated and will be "
-            "removed in a future version of cloud-init."
+        lifecycle.deprecate(
+            deprecated="Using a string value for the 'ssh_pwauth' key",
+            deprecated_version="22.2",
+            extra_message="Use a boolean value with 'ssh_pwauth'.",
         )
     if util.is_true(pw_auth):
         cfg_val = "yes"
@@ -145,28 +94,36 @@ def handle_ssh_pwauth(pw_auth, distro: Distro):
 
     if distro.uses_systemd():
         state = subp.subp(
-            f"systemctl show --property ActiveState --value {service}"
-        ).stdout
+            [
+                "systemctl",
+                "show",
+                "--property",
+                "ActiveState",
+                "--value",
+                service,
+            ]
+        ).stdout.strip()
         if state.lower() in ["active", "activating", "reloading"]:
-            distro.manage_service("restart", service)
-            LOG.debug("Restarted the SSH daemon.")
-        else:
-            LOG.debug("Not restarting SSH service: service is stopped.")
-    else:
-        try:
-            distro.manage_service("restart", service)
-            LOG.debug("Restarted the SSH daemon.")
-        except subp.ProcessExecutionError:
-            util.logexc(
-                LOG,
-                "Cloud-init was unable to restart SSH daemon. "
-                "'ssh_pwauth' configuration may not be applied.",
+            # This module runs Before=sshd.service. What that means is that
+            # the code can only get to this point if a user manually starts the
+            # network stage. While this isn't a well-supported use-case, this
+            # does cause a deadlock if started via systemd directly:
+            # "systemctl start cloud-init.service". Prevent users from causing
+            # this deadlock by forcing systemd to ignore dependencies when
+            # restarting. Note that this deadlock is not possible in newer
+            # versions of cloud-init, since starting the second service doesn't
+            # run the second stage in 24.3+. This code therefore exists solely
+            # for backwards compatibility so that users who think that they
+            # need to manually start cloud-init (why?) with systemd (again,
+            # why?) can do so.
+            _restart_ssh_daemon(
+                distro, service, "--job-mode=ignore-dependencies"
             )
+    else:
+        _restart_ssh_daemon(distro, service)
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     distro: Distro = cloud.distro
     if args:
         # if run from command line, and give args, wipe the chpasswd['list']
@@ -184,19 +141,21 @@ def handle(
         chfg = cfg["chpasswd"]
         users_list = util.get_cfg_option_list(chfg, "users", default=[])
         if "list" in chfg and chfg["list"]:
-            log.warning(
-                "DEPRECATION: key 'lists' is now deprecated. Use 'users'."
+            lifecycle.deprecate(
+                deprecated="Config key 'lists'",
+                deprecated_version="22.3",
+                extra_message="Use 'users' instead.",
             )
             if isinstance(chfg["list"], list):
-                log.debug("Handling input for chpasswd as list.")
+                LOG.debug("Handling input for chpasswd as list.")
                 plist = util.get_cfg_option_list(chfg, "list", plist)
             else:
-                log.warning(
-                    "DEPRECATION: The chpasswd multiline string format is "
-                    "deprecated and will be removed from a future version of "
-                    "cloud-init. Use the list format instead."
+                lifecycle.deprecate(
+                    deprecated="The chpasswd multiline string",
+                    deprecated_version="22.2",
+                    extra_message="Use string type instead.",
                 )
-                log.debug("Handling input for chpasswd as multiline string.")
+                LOG.debug("Handling input for chpasswd as multiline string.")
                 multiline = util.get_cfg_option_str(chfg, "list")
                 if multiline:
                     plist = multiline.splitlines()
@@ -209,7 +168,7 @@ def handle(
         if user:
             plist = ["%s:%s" % (user, password)]
         else:
-            log.warning("No default or defined user to change password for.")
+            LOG.warning("No default or defined user to change password for.")
 
     errors = []
     if plist or users_list:
@@ -249,22 +208,22 @@ def handle(
                 users.append(u)
         if users:
             try:
-                log.debug("Changing password for %s:", users)
+                LOG.debug("Changing password for %s:", users)
                 distro.chpasswd(plist_in, hashed=False)
             except Exception as e:
                 errors.append(e)
                 util.logexc(
-                    log, "Failed to set passwords with chpasswd for %s", users
+                    LOG, "Failed to set passwords with chpasswd for %s", users
                 )
 
         if hashed_users:
             try:
-                log.debug("Setting hashed password for %s:", hashed_users)
+                LOG.debug("Setting hashed password for %s:", hashed_users)
                 distro.chpasswd(hashed_plist_in, hashed=True)
             except Exception as e:
                 errors.append(e)
                 util.logexc(
-                    log,
+                    LOG,
                     "Failed to set hashed passwords with chpasswd for %s",
                     hashed_users,
                 )
@@ -274,7 +233,7 @@ def handle(
                 "Set the following 'random' passwords\n",
                 "\n".join(randlist),
             )
-            util.multi_log(
+            log_util.multi_log(
                 "%s\n%s\n" % blurb, stderr=False, fallback_to_stdout=False
             )
 
@@ -289,16 +248,41 @@ def handle(
                     expired_users.append(u)
                 except Exception as e:
                     errors.append(e)
-                    util.logexc(log, "Failed to set 'expire' for %s", u)
+                    util.logexc(LOG, "Failed to set 'expire' for %s", u)
             if expired_users:
-                log.debug("Expired passwords for: %s users", expired_users)
+                LOG.debug("Expired passwords for: %s users", expired_users)
 
     handle_ssh_pwauth(cfg.get("ssh_pwauth"), distro)
 
     if len(errors):
-        log.debug("%s errors occurred, re-raising the last one", len(errors))
+        LOG.debug("%s errors occurred, re-raising the last one", len(errors))
         raise errors[-1]
 
 
 def rand_user_password(pwlen=20):
-    return util.rand_str(pwlen, select_from=PW_SET)
+    if pwlen < 4:
+        raise ValueError("Password length must be at least 4 characters.")
+
+    # There are often restrictions on the minimum number of character
+    # classes required in a password, so ensure we at least one character
+    # from each class.
+    res_rand_list = [
+        random.choice(string.digits),
+        random.choice(string.ascii_lowercase),
+        random.choice(string.ascii_uppercase),
+        random.choice(string.punctuation),
+    ]
+
+    res_rand_list.extend(
+        list(
+            util.rand_str(
+                pwlen - len(res_rand_list),
+                select_from=string.digits
+                + string.ascii_lowercase
+                + string.ascii_uppercase
+                + string.punctuation,
+            )
+        )
+    )
+    random.shuffle(res_rand_list)
+    return "".join(res_rand_list)

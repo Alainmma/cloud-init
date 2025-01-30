@@ -9,16 +9,17 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import json
+import logging
 import re
 from copy import copy, deepcopy
 from ipaddress import IPv4Network
+from typing import Dict, List, TypedDict
 
-from cloudinit import log as logging
-from cloudinit import subp, util
+from cloudinit import lifecycle, subp, util
 from cloudinit.net.network_state import net_prefix_to_ipv4_mask
 from cloudinit.simpletable import SimpleTable
 
-LOG = logging.getLogger()
+LOG = logging.getLogger(__name__)
 
 # Example netdev format:
 # {'eth0': {'hwaddr': '00:16:3e:16:db:54',
@@ -38,6 +39,13 @@ LOG = logging.getLogger()
 #         'ipv6': [{'ip': '::1/128', 'scope6': 'host'}],
 #         'up': True}}
 DEFAULT_NETDEV_INFO = {"ipv4": [], "ipv6": [], "hwaddr": "", "up": False}
+
+
+class Interface(TypedDict):
+    up: bool
+    hwaddr: str
+    ipv4: List[dict]
+    ipv6: List[dict]
 
 
 def _netdev_info_iproute_json(ipaddr_json):
@@ -94,11 +102,13 @@ def _netdev_info_iproute_json(ipaddr_json):
     return devs
 
 
+@lifecycle.deprecate_call(
+    deprecated_version="22.1",
+    extra_message="Required by old iproute2 versions that don't "
+    "support ip json output. Consider upgrading to a more recent version.",
+)
 def _netdev_info_iproute(ipaddr_out):
     """
-    DEPRECATED: Only used on distros that don't support ip json output
-    Use _netdev_info_iproute_json() when possible.
-
     @param ipaddr_out: Output string from 'ip addr show' command.
 
     @returns: A dict of device info keyed by network device name containing
@@ -280,7 +290,45 @@ def _netdev_info_ifconfig(ifconfig_data):
     return devs
 
 
-def netdev_info(empty=""):
+def netdev_info(
+    empty="",
+) -> Dict[str, Dict[str, Interface]]:
+    """return the instance's interfaces and interface data
+
+    includes, interface name, link state, hardware address, and lists of ipv4
+    and ipv6 addresses
+
+    example output:
+    {
+    'lo': {
+        'up': True,
+        'hwaddr': '',
+        'ipv4': [
+        {
+            'bcast': '',
+            'ip': '127.0.0.1',
+            'mask': '255.0.0.0',
+            'scope': 'host',
+        }],
+        'ipv6': [{'ip': '::1/128', 'scope6': 'host'}],
+    },
+    'lxdbr0': {
+        'up': True
+        'hwaddr': '00:16:3e:fa:84:30',
+        'ipv4': [{
+            'bcast': '',
+            'ip': '10.161.80.1',
+            'mask': '255.255.255.0',
+            'scope': 'global',
+        }],
+        'ipv6': [
+            {'ip': 'fd42:80e2:4695:1e96::1/64', 'scope6': 'global'},
+            {'ip': 'fe80::216:3eff:fefa:8430/64', 'scope6': 'link'},
+        ]
+    },
+    }
+
+    """
     devs = {}
     if util.is_NetBSD():
         (ifcfg_out, _err) = subp.subp(["ifconfig", "-a"], rcs=[0, 1])
@@ -538,7 +586,7 @@ def netdev_pformat():
             return "\n"
         fields = ["Device", "Up", "Address", "Mask", "Scope", "Hw-Address"]
         tbl = SimpleTable(fields)
-        for (dev, data) in sorted(netdev.items()):
+        for dev, data in sorted(netdev.items()):
             for addr in data.get("ipv4"):
                 tbl.add_row(
                     (
@@ -594,18 +642,21 @@ def route_pformat():
                 "Flags",
             ]
             tbl_v4 = SimpleTable(fields_v4)
-            for (n, r) in enumerate(routes.get("ipv4")):
+            for n, r in enumerate(routes.get("ipv4")):
                 route_id = str(n)
-                tbl_v4.add_row(
-                    [
-                        route_id,
-                        r["destination"],
-                        r["gateway"],
-                        r["genmask"],
-                        r["iface"],
-                        r["flags"],
-                    ]
-                )
+                try:
+                    tbl_v4.add_row(
+                        [
+                            route_id,
+                            r["destination"],
+                            r.get("gateway", "0.0.0.0"),
+                            r["genmask"],
+                            r["iface"],
+                            r["flags"],
+                        ]
+                    )
+                except KeyError as e:
+                    util.logexc(LOG, "Route info formatting error: %s" % e)
             route_s = tbl_v4.get_string()
             max_len = len(max(route_s.splitlines(), key=len))
             header = util.center("Route IPv4 info", "+", max_len)
@@ -619,19 +670,22 @@ def route_pformat():
                 "Flags",
             ]
             tbl_v6 = SimpleTable(fields_v6)
-            for (n, r) in enumerate(routes.get("ipv6")):
+            for n, r in enumerate(routes.get("ipv6")):
                 route_id = str(n)
                 if r["iface"] == "lo":
                     continue
-                tbl_v6.add_row(
-                    [
-                        route_id,
-                        r["destination"],
-                        r["gateway"],
-                        r["iface"],
-                        r["flags"],
-                    ]
-                )
+                try:
+                    tbl_v6.add_row(
+                        [
+                            route_id,
+                            r["destination"],
+                            r.get("gateway", "::"),
+                            r["iface"],
+                            r["flags"],
+                        ]
+                    )
+                except KeyError as e:
+                    util.logexc(LOG, "Route info formatting error: %s" % e)
             route_s = tbl_v6.get_string()
             max_len = len(max(route_s.splitlines(), key=len))
             header = util.center("Route IPv6 info", "+", max_len)
@@ -654,6 +708,3 @@ def debug_info(prefix="ci-info: "):
     else:
         lines.extend(route_lines)
     return "\n".join(lines)
-
-
-# vi: ts=4 expandtab

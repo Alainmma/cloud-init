@@ -10,42 +10,34 @@
 
 import itertools
 import json
+import logging
 import os
-from logging import Logger
-from textwrap import dedent
+from typing import List
 
 from cloudinit import subp, temp_utils, templater, url_helper, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.distros import Distro
 from cloudinit.settings import PER_ALWAYS
 
 RUBY_VERSION_DEFAULT = "1.8"
 
-CHEF_DIRS = tuple(
-    [
-        "/etc/chef",
-        "/var/log/chef",
-        "/var/lib/chef",
-        "/var/cache/chef",
-        "/var/backups/chef",
-        "/var/run/chef",
-    ]
+CHEF_DIRS = (
+    "/etc/chef",
+    "/var/log/chef",
+    "/var/lib/chef",
+    "/var/cache/chef",
+    "/var/backups/chef",
+    "/var/run/chef",
 )
-REQUIRED_CHEF_DIRS = tuple(
-    [
-        "/etc/chef",
-    ]
-)
+REQUIRED_CHEF_DIRS = ("/etc/chef",)
 
 # Used if fetching chef from a omnibus style package
 OMNIBUS_URL = "https://www.chef.io/chef/install.sh"
 OMNIBUS_URL_RETRIES = 5
 
 CHEF_VALIDATION_PEM_PATH = "/etc/chef/validation.pem"
-CHEF_ENCRYPTED_DATA_BAG_PATH = "/etc/chef/encrypted_data_bag_secret"
-CHEF_ENVIRONMENT = "_default"
 CHEF_FB_PATH = "/etc/chef/firstboot.json"
 CHEF_RB_TPL_DEFAULTS = {
     # These are ruby symbols...
@@ -76,77 +68,33 @@ CHEF_RB_TPL_PATH_KEYS = frozenset(
     ]
 )
 CHEF_RB_TPL_KEYS = frozenset(
-    itertools.chain(
-        CHEF_RB_TPL_DEFAULTS.keys(),
-        CHEF_RB_TPL_BOOL_KEYS,
-        CHEF_RB_TPL_PATH_KEYS,
-        [
-            "server_url",
-            "node_name",
-            "environment",
-            "validation_name",
-            "chef_license",
-        ],
-    )
+    [
+        *CHEF_RB_TPL_DEFAULTS.keys(),
+        *CHEF_RB_TPL_BOOL_KEYS,
+        *CHEF_RB_TPL_PATH_KEYS,
+        "server_url",
+        "node_name",
+        "environment",
+        "validation_name",
+        "chef_license",
+    ]
 )
 CHEF_RB_PATH = "/etc/chef/client.rb"
 CHEF_EXEC_PATH = "/usr/bin/chef-client"
-CHEF_EXEC_DEF_ARGS = tuple(["-d", "-i", "1800", "-s", "20"])
+CHEF_EXEC_DEF_ARGS = ("-d", "-i", "1800", "-s", "20")
 
 
-frequency = PER_ALWAYS
-distros = ["all"]
+LOG = logging.getLogger(__name__)
 
 meta: MetaSchema = {
     "id": "cc_chef",
-    "name": "Chef",
-    "title": "module that configures, starts and installs chef",
-    "description": dedent(
-        """\
-        This module enables chef to be installed (from packages,
-        gems, or from omnibus). Before this occurs, chef configuration is
-        written to disk (validation.pem, client.pem, firstboot.json,
-        client.rb), and required directories are created (/etc/chef and
-        /var/log/chef and so-on). If configured, chef will be
-        installed and started in either daemon or non-daemon mode.
-        If run in non-daemon mode, post run actions are executed to do
-        finishing activities such as removing validation.pem."""
-    ),
-    "distros": distros,
-    "examples": [
-        dedent(
-            """
-        chef:
-          directories:
-            - /etc/chef
-            - /var/log/chef
-          validation_cert: system
-          install_type: omnibus
-          initial_attributes:
-            apache:
-              prefork:
-                maxclients: 100
-              keepalive: off
-          run_list:
-            - recipe[apache2]
-            - role[db]
-          encrypted_data_bag_secret: /etc/chef/encrypted_data_bag_secret
-          environment: _default
-          log_level: :auto
-          omnibus_url_retries: 2
-          server_url: https://chef.yourorg.com:4000
-          ssl_verify_mode: :verify_peer
-          validation_name: yourorg-validator"""
-        )
-    ],
-    "frequency": frequency,
+    "distros": ["all"],
+    "frequency": PER_ALWAYS,
     "activate_by_schema_keys": ["chef"],
 }
 
-__doc__ = get_meta_doc(meta)
 
-
-def post_run_chef(chef_cfg, log):
+def post_run_chef(chef_cfg):
     delete_pem = util.get_cfg_option_bool(
         chef_cfg, "delete_validation_post_exec", default=False
     )
@@ -154,14 +102,14 @@ def post_run_chef(chef_cfg, log):
         os.unlink(CHEF_VALIDATION_PEM_PATH)
 
 
-def get_template_params(iid, chef_cfg, log):
+def get_template_params(iid, chef_cfg):
     params = CHEF_RB_TPL_DEFAULTS.copy()
     # Allow users to overwrite any of the keys they want (if they so choose),
     # when a value is None, then the value will be set to None and no boolean
     # or string version will be populated...
-    for (k, v) in chef_cfg.items():
+    for k, v in chef_cfg.items():
         if k not in CHEF_RB_TPL_KEYS:
-            log.debug("Skipping unknown chef template key '%s'", k)
+            LOG.debug("Skipping unknown chef template key '%s'", k)
             continue
         if v is None:
             params[k] = None
@@ -189,14 +137,12 @@ def get_template_params(iid, chef_cfg, log):
     return params
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     """Handler method activated by cloud-init."""
 
     # If there isn't a chef key in the configuration don't do anything
     if "chef" not in cfg:
-        log.debug(
+        LOG.debug(
             "Skipping module named %s, no 'chef' key in configuration", name
         )
         return
@@ -218,35 +164,38 @@ def handle(
         if vcert != "system":
             util.write_file(vkey_path, vcert)
         elif not os.path.isfile(vkey_path):
-            log.warning(
+            LOG.warning(
                 "chef validation_cert provided as 'system', but "
                 "validation_key path '%s' does not exist.",
                 vkey_path,
             )
 
     # Create the chef config from template
+    cfg_filename = util.get_cfg_option_str(
+        chef_cfg, "config_path", default=CHEF_RB_PATH
+    )
     template_fn = cloud.get_template_filename("chef_client.rb")
     if template_fn:
         iid = str(cloud.datasource.get_instance_id())
-        params = get_template_params(iid, chef_cfg, log)
+        params = get_template_params(iid, chef_cfg)
         # Do a best effort attempt to ensure that the template values that
         # are associated with paths have their parent directory created
         # before they are used by the chef-client itself.
         param_paths = set()
-        for (k, v) in params.items():
+        for k, v in params.items():
             if k in CHEF_RB_TPL_PATH_KEYS and v:
                 param_paths.add(os.path.dirname(v))
         util.ensure_dirs(param_paths)
-        templater.render_to_file(template_fn, CHEF_RB_PATH, params)
+        templater.render_to_file(template_fn, cfg_filename, params)
     else:
-        log.warning("No template found, not rendering to %s", CHEF_RB_PATH)
+        LOG.warning("No template found, not rendering to %s", cfg_filename)
 
     # Set the firstboot json
     fb_filename = util.get_cfg_option_str(
         chef_cfg, "firstboot_path", default=CHEF_FB_PATH
     )
     if not fb_filename:
-        log.info("First boot path empty, not writing first boot json file")
+        LOG.info("First boot path empty, not writing first boot json file")
     else:
         initial_json = {}
         if "run_list" in chef_cfg:
@@ -263,18 +212,18 @@ def handle(
     )
     installed = subp.is_exe(CHEF_EXEC_PATH)
     if not installed or force_install:
-        run = install_chef(cloud, chef_cfg, log)
+        run = install_chef(cloud, chef_cfg)
     elif installed:
         run = util.get_cfg_option_bool(chef_cfg, "exec", default=False)
     else:
         run = False
     if run:
-        run_chef(chef_cfg, log)
-        post_run_chef(chef_cfg, log)
+        run_chef(chef_cfg)
+        post_run_chef(chef_cfg)
 
 
-def run_chef(chef_cfg, log):
-    log.debug("Running chef-client")
+def run_chef(chef_cfg):
+    LOG.debug("Running chef-client")
     cmd = [CHEF_EXEC_PATH]
     if "exec_arguments" in chef_cfg:
         cmd_args = chef_cfg["exec_arguments"]
@@ -283,7 +232,7 @@ def run_chef(chef_cfg, log):
         elif isinstance(cmd_args, str):
             cmd.append(cmd_args)
         else:
-            log.warning(
+            LOG.warning(
                 "Unknown type %s provided for chef"
                 " 'exec_arguments' expected list, tuple,"
                 " or string",
@@ -345,7 +294,7 @@ def install_chef_from_omnibus(
     )
 
 
-def install_chef(cloud: Cloud, chef_cfg, log):
+def install_chef(cloud: Cloud, chef_cfg):
     # If chef is not installed, we install chef based on 'install_type'
     install_type = util.get_cfg_option_str(
         chef_cfg, "install_type", "packages"
@@ -363,7 +312,7 @@ def install_chef(cloud: Cloud, chef_cfg, log):
         run = util.get_cfg_option_bool(chef_cfg, "exec", default=True)
     elif install_type == "packages":
         # This will install and run the chef-client from packages
-        cloud.distro.install_packages(("chef",))
+        cloud.distro.install_packages(["chef"])
     elif install_type == "omnibus":
         omnibus_version = util.get_cfg_option_str(chef_cfg, "omnibus_version")
         install_chef_from_omnibus(
@@ -373,14 +322,14 @@ def install_chef(cloud: Cloud, chef_cfg, log):
             omnibus_version=omnibus_version,
         )
     else:
-        log.warning("Unknown chef install type '%s'", install_type)
+        LOG.warning("Unknown chef install type '%s'", install_type)
         run = False
     return run
 
 
-def get_ruby_packages(version):
+def get_ruby_packages(version) -> List[str]:
     # return a list of packages needed to install ruby at version
-    pkgs = ["ruby%s" % version, "ruby%s-dev" % version]
+    pkgs: List[str] = ["ruby%s" % version, "ruby%s-dev" % version]
     if version == "1.8":
         pkgs.extend(("libopenssl-ruby1.8", "rubygems1.8"))
     return pkgs
@@ -421,6 +370,3 @@ def install_chef_from_gems(ruby_version, chef_version, distro):
             ],
             capture=False,
         )
-
-
-# vi: ts=4 expandtab

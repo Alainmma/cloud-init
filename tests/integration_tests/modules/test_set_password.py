@@ -8,11 +8,12 @@ other tests chpasswd's list being a string.  Both expect the same results, so
 they use a mixin to share their test definitions, because we can (of course)
 only specify one user-data per instance.
 """
+
 import pytest
 import yaml
 
-from tests.integration_tests.clouds import ImageSpecification
 from tests.integration_tests.decorators import retry
+from tests.integration_tests.releases import CURRENT_RELEASE, IS_UBUNTU
 from tests.integration_tests.util import get_console_log
 
 COMMON_USER_DATA = """\
@@ -162,9 +163,17 @@ class Mixin:
 
     def test_explicit_password_set_correctly(self, class_client):
         """Test that an explicitly-specified password is set correctly."""
+        minor_version = int(
+            class_client.execute(
+                "python3 -c 'import sys;print(sys.version_info[1])'"
+            ).strip()
+        )
+        if minor_version > 12:
+            pytest.xfail("Instance under test doesn't have 'crypt' in stdlib")
         shadow_users, _ = self._fetch_and_parse_etc_shadow(class_client)
 
         fmt_and_salt = shadow_users["tom"].rsplit("$", 1)[0]
+
         GEN_CRYPT_CONTENT = (
             "import crypt\n"
             f"print(crypt.crypt('mypassword123!', '{fmt_and_salt}'))\n"
@@ -182,7 +191,7 @@ class Mixin:
 
     def test_sshd_config_file(self, class_client):
         """Test that SSH config is written in the correct file."""
-        if ImageSpecification.from_os_image().release in {"bionic"}:
+        if CURRENT_RELEASE.series == "bionic":
             sshd_file_target = "/etc/ssh/sshd_config"
         else:
             sshd_file_target = "/etc/ssh/sshd_config.d/50-cloud-init.conf"
@@ -190,6 +199,15 @@ class Mixin:
         sshd_config = class_client.read_from_file(sshd_file_target)
         # We look for the exact line match, to avoid a commented line matching
         assert "PasswordAuthentication yes" in sshd_config.splitlines()
+
+    @pytest.mark.skipif(not IS_UBUNTU, reason="Use of systemctl")
+    def test_check_ssh_service(self, class_client):
+        """Ensure we check the sshd status because we modified the config"""
+        log = class_client.read_from_file("/var/log/cloud-init.log")
+        assert (
+            "'systemctl', 'show', '--property', 'ActiveState', "
+            "'--value', 'ssh'" in log
+        )
 
     def test_sshd_config(self, class_client):
         """Test that SSH password auth is enabled."""

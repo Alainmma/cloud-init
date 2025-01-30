@@ -3,13 +3,14 @@
 import base64
 import gzip
 import io
+import logging
 import re
 import shutil
 import tempfile
 
 import pytest
+import responses
 
-from cloudinit import log as logging
 from cloudinit import util
 from cloudinit.config.cc_write_files import decode_perms, handle, write_files
 from cloudinit.config.schema import (
@@ -18,6 +19,7 @@ from cloudinit.config.schema import (
     validate_cloudconfig_schema,
 )
 from tests.unittests.helpers import (
+    SCHEMA_EMPTY_ERROR,
     CiTestCase,
     FilesystemMockingTestCase,
     skipUnlessJsonSchema,
@@ -81,7 +83,17 @@ class TestWriteFiles(FilesystemMockingTestCase):
             [{"content": expected, "path": filename}],
             self.owner,
         )
-        self.assertEqual(util.load_file(filename), expected)
+        self.assertEqual(util.load_text_file(filename), expected)
+
+    def test_empty(self):
+        self.patchUtils(self.tmp)
+        filename = "/tmp/my.file"
+        write_files(
+            "test_empty",
+            [{"path": filename}],
+            self.owner,
+        )
+        self.assertEqual(util.load_text_file(filename), "")
 
     def test_append(self):
         self.patchUtils(self.tmp)
@@ -95,14 +107,14 @@ class TestWriteFiles(FilesystemMockingTestCase):
             [{"content": added, "path": filename, "append": "true"}],
             self.owner,
         )
-        self.assertEqual(util.load_file(filename), expected)
+        self.assertEqual(util.load_text_file(filename), expected)
 
     def test_yaml_binary(self):
         self.patchUtils(self.tmp)
         data = util.load_yaml(YAML_TEXT)
         write_files("testname", data["write_files"], self.owner)
         for path, content in YAML_CONTENT_EXPECTED.items():
-            self.assertEqual(util.load_file(path), content)
+            self.assertEqual(util.load_text_file(path), content)
 
     def test_all_decodings(self):
         self.patchUtils(self.tmp)
@@ -126,18 +138,19 @@ class TestWriteFiles(FilesystemMockingTestCase):
             b64 = (base64.b64encode(data), b64_aliases)
             for content, aliases in (gz, gz_b64, b64):
                 for enc in aliases:
+                    path = "/tmp/file-%s-%s" % (name, enc)
                     cur = {
                         "content": content,
-                        "path": "/tmp/file-%s-%s" % (name, enc),
+                        "path": path,
                         "encoding": enc,
                     }
                     files.append(cur)
-                    expected.append((cur["path"], data))
+                    expected.append((path, data))
 
         write_files("test_decoding", files, self.owner)
 
         for path, content in expected:
-            self.assertEqual(util.load_file(path, decode=False), content)
+            self.assertEqual(util.load_binary_file(path), content)
 
         # make sure we actually wrote *some* files.
         flen_expected = len(gz_aliases + gz_b64_aliases + b64_aliases) * len(
@@ -160,20 +173,85 @@ class TestWriteFiles(FilesystemMockingTestCase):
             ]
         }
         cc = self.tmp_cloud("ubuntu")
-        handle("ignored", cfg, cc, LOG, [])
-        assert content == util.load_file(file_path)
+        handle("ignored", cfg, cc, [])
+        assert content == util.load_text_file(file_path)
         self.assertNotIn(
             "Unknown encoding type text/plain", self.logs.getvalue()
         )
+
+    def test_file_uri(self):
+        self.patchUtils(self.tmp)
+        src_path = "/tmp/file-uri"
+        dst_path = "/tmp/file-uri-target"
+        content = "asdf"
+        util.write_file(src_path, content)
+        cfg = {
+            "write_files": [
+                {
+                    "source": {"uri": "file://" + src_path},
+                    "path": dst_path,
+                }
+            ]
+        }
+        cc = self.tmp_cloud("ubuntu")
+        handle("ignored", cfg, cc, [])
+        self.assertEqual(
+            util.load_text_file(src_path), util.load_text_file(dst_path)
+        )
+
+    @responses.activate
+    def test_http_uri(self):
+        self.patchUtils(self.tmp)
+        path = "/tmp/http-uri-target"
+        url = "http://hostname/path"
+        content = "more asdf"
+        responses.add(responses.GET, url, content)
+        cfg = {
+            "write_files": [
+                {
+                    "source": {
+                        "uri": url,
+                        "headers": {
+                            "foo": "bar",
+                            "blah": "blah",
+                        },
+                    },
+                    "path": path,
+                }
+            ]
+        }
+        cc = self.tmp_cloud("ubuntu")
+        handle("ignored", cfg, cc, [])
+        self.assertEqual(content, util.load_text_file(path))
+
+    def test_uri_fallback(self):
+        self.patchUtils(self.tmp)
+        src_path = "/tmp/INVALID"
+        dst_path = "/tmp/uri-fallback-target"
+        content = "asdf"
+        util.del_file(src_path)
+        cfg = {
+            "write_files": [
+                {
+                    "source": {"uri": "file://" + src_path},
+                    "content": content,
+                    "encoding": "text/plain",
+                    "path": dst_path,
+                }
+            ]
+        }
+        cc = self.tmp_cloud("ubuntu")
+        handle("ignored", cfg, cc, [])
+        self.assertEqual(content, util.load_text_file(dst_path))
 
     def test_deferred(self):
         self.patchUtils(self.tmp)
         file_path = "/tmp/deferred.file"
         config = {"write_files": [{"path": file_path, "defer": True}]}
         cc = self.tmp_cloud("ubuntu")
-        handle("cc_write_file", config, cc, LOG, [])
+        handle("cc_write_file", config, cc, [])
         with self.assertRaises(FileNotFoundError):
-            util.load_file(file_path)
+            util.load_text_file(file_path)
 
 
 class TestDecodePerms(CiTestCase):
@@ -222,7 +300,10 @@ class TestWriteFilesSchema:
         [
             # Top-level write_files type validation
             ({"write_files": 1}, "write_files: 1 is not of type 'array'"),
-            ({"write_files": []}, re.escape("write_files: [] is too short")),
+            (
+                {"write_files": []},
+                re.escape("write_files: [] ") + SCHEMA_EMPTY_ERROR,
+            ),
             (
                 {"write_files": [{}]},
                 "write_files.0: 'path' is a required property",
@@ -245,6 +326,12 @@ class TestWriteFilesSchema:
                     "write_files": [
                         {
                             "append": False,
+                            "source": {
+                                "uri": "http://a.com/a",
+                                "headers": {
+                                    "Authorization": "Bearer SOME_TOKEN"
+                                },
+                            },
                             "content": "a",
                             "encoding": "text/plain",
                             "owner": "jeff",
@@ -264,6 +351,3 @@ class TestWriteFilesSchema:
                 validate_cloudconfig_schema(config, get_schema(), strict=True)
         else:
             validate_cloudconfig_schema(config, get_schema(), strict=True)
-
-
-# vi: ts=4 expandtab

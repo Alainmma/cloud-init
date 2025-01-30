@@ -101,12 +101,12 @@ def lxd_ds(request, paths):
     Return an instantiated DataSourceLXD.
 
     This also performs the mocking required for the default test case:
-        * ``is_platform_viable`` returns True,
+        * ``ds_detect`` returns True,
         * ``read_metadata`` returns ``LXD_V1_METADATA``
 
     (This uses the paths fixture for the required helpers.Paths object)
     """
-    with mock.patch(DS_PATH + "is_platform_viable", return_value=True):
+    with mock.patch(DS_PATH + "DataSourceLXD.ds_detect", return_value=True):
         with mock.patch(
             DS_PATH + "read_metadata", return_value=lxd_metadata()
         ):
@@ -121,12 +121,12 @@ def lxd_ds_no_network_config(request, paths):
     Return an instantiated DataSourceLXD.
 
     This also performs the mocking required for the default test case:
-        * ``is_platform_viable`` returns True,
+        * ``ds_detect`` returns True,
         * ``read_metadata`` returns ``LXD_V1_METADATA_NO_NETWORK_CONFIG``
 
     (This uses the paths fixture for the required helpers.Paths object)
     """
-    with mock.patch(DS_PATH + "is_platform_viable", return_value=True):
+    with mock.patch(DS_PATH + "DataSourceLXD.ds_detect", return_value=True):
         with mock.patch(
             DS_PATH + "read_metadata",
             return_value=lxd_metadata_no_network_config(),
@@ -333,13 +333,13 @@ class TestDataSourceLXD:
         assert NETWORK_V1 == lxd_ds.network_config
         assert LXD_V1_METADATA == lxd_ds._crawled_metadata
 
+    @mock.patch.object(lxd, "generate_network_config", return_value=NETWORK_V1)
     def test_network_config_crawled_metadata_no_network_config(
-        self, lxd_ds_no_network_config
+        self, m_generate, lxd_ds_no_network_config
     ):
         """network_config is correctly computed when _network_config is unset
         and _crawled_metadata does not contain network_config.
         """
-        lxd.generate_network_config = mock.Mock(return_value=NETWORK_V1)
         assert UNSET == lxd_ds_no_network_config._crawled_metadata
         assert UNSET == lxd_ds_no_network_config._network_config
         assert None is lxd_ds_no_network_config.userdata_raw
@@ -349,7 +349,7 @@ class TestDataSourceLXD:
             LXD_V1_METADATA_NO_NETWORK_CONFIG
             == lxd_ds_no_network_config._crawled_metadata
         )
-        assert 1 == lxd.generate_network_config.call_count
+        assert 1 == m_generate.call_count
 
 
 class TestIsPlatformViable:
@@ -369,7 +369,7 @@ class TestIsPlatformViable:
         """Return True only when LXD_SOCKET_PATH exists and is a socket."""
         m_exists.return_value = exists
         m_lstat.return_value = LStatResponse(lstat_mode)
-        assert expected is lxd.is_platform_viable()
+        assert expected is lxd.DataSourceLXD.ds_detect()
         m_exists.assert_has_calls([mock.call(lxd.LXD_SOCKET_PATH)])
         if exists:
             m_lstat.assert_has_calls([mock.call(lxd.LXD_SOCKET_PATH)])
@@ -650,8 +650,10 @@ class TestReadMetadata:
                 mock_status_code = mock.PropertyMock(return_value=404)
             type(m_resp).ok = mock_ok
             type(m_resp).status_code = mock_status_code
-            mock_text = mock.PropertyMock(return_value=content)
-            type(m_resp).text = mock_text
+            mock_content = mock.PropertyMock(
+                return_value=content.encode("utf-8")
+            )
+            type(m_resp).content = mock_content
             return m_resp
 
         m_session_get.side_effect = fake_get
@@ -697,5 +699,46 @@ class TestReadMetadata:
             == m_session_get.call_args_list
         )
 
+    @mock.patch.object(lxd.requests.Session, "get")
+    @mock.patch.object(lxd.time, "sleep")
+    def test_socket_retry(self, m_session_get, m_sleep):
+        """validate socket retry logic"""
 
-# vi: ts=4 expandtab
+        def generate_return_codes():
+            """
+            [200]
+            [500, 200]
+            [500, 500, 200]
+            [500, 500, ..., 200]
+            """
+            five_hundreds = []
+
+            # generate a couple of longer ones to assert timeout condition
+            for _ in range(33):
+                five_hundreds.append(500)
+                yield [*five_hundreds, 200]
+
+        for return_codes in generate_return_codes():
+            m = mock.Mock(
+                get=mock.Mock(
+                    side_effect=[
+                        mock.MagicMock(
+                            ok=mock.PropertyMock(return_value=True),
+                            status_code=code,
+                            text=mock.PropertyMock(
+                                return_value="properly formatted http response"
+                            ),
+                        )
+                        for code in return_codes
+                    ]
+                )
+            )
+            resp = lxd._do_request(m, "http://agua/")
+
+            # assert that 30 iterations or the first 200 code is the final
+            # attempt, whichever comes first
+            assert min(len(return_codes), 30) == m.get.call_count
+            if len(return_codes) < 31:
+                assert 200 == resp.status_code
+            else:
+                assert 500 == resp.status_code

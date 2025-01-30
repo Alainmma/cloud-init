@@ -17,7 +17,10 @@ Once SSH'd in, we check that the two keys in .ssh/authorized_keys have the same
 material: if the Azure datasource has removed the CRLFs correctly, then they
 will match.
 """
+
 import pytest
+
+from tests.integration_tests.integration_settings import PLATFORM
 
 USER_DATA_TMPL = """\
 #cloud-config
@@ -25,8 +28,8 @@ ssh_authorized_keys:
     - {}"""
 
 
-@pytest.mark.azure
-def test_crlf_in_azure_metadata_ssh_keys(session_cloud, setup_image):
+@pytest.mark.skipif(PLATFORM != "azure", reason="Test is Azure specific")
+def test_crlf_in_azure_metadata_ssh_keys(session_cloud):
     authorized_keys_path = "/home/{}/.ssh/authorized_keys".format(
         session_cloud.cloud_instance.username
     )

@@ -9,9 +9,9 @@ import json
 import sys
 
 from cloudinit.cmd.devel import read_cfg_paths
-from cloudinit.cmd.status import UXAppStatus, get_status_details
+from cloudinit.cmd.status import RunningStatus, get_status_details
+from cloudinit.log import log_util
 from cloudinit.sources import METADATA_UNKNOWN, canonical_cloud_id
-from cloudinit.util import error
 
 NAME = "cloud-id"
 
@@ -66,23 +66,23 @@ def handle_args(name, args):
     @return: 0 on success, 1 on error, 2 on disabled, 3 on cloud-init not run.
     """
     status_details = get_status_details()
-    if status_details.status == UXAppStatus.DISABLED:
-        sys.stdout.write("{0}\n".format(status_details.status.value))
+    if status_details.running_status == RunningStatus.DISABLED:
+        sys.stdout.write("{0}\n".format(status_details.running_status.value))
         return 2
-    elif status_details.status == UXAppStatus.NOT_RUN:
-        sys.stdout.write("{0}\n".format(status_details.status.value))
+    elif status_details.running_status == RunningStatus.NOT_STARTED:
+        sys.stdout.write("{0}\n".format(status_details.running_status.value))
         return 3
 
     try:
         with open(args.instance_data) as file:
             instance_data = json.load(file)
     except IOError:
-        return error(
+        return log_util.error(
             "File not found '%s'. Provide a path to instance data json file"
             " using --instance-data" % args.instance_data
         )
     except ValueError as e:
-        return error(
+        return log_util.error(
             "File '%s' is not valid json. %s" % (args.instance_data, e)
         )
     v1 = instance_data.get("v1", {})

@@ -22,11 +22,13 @@ Generation
 ==========
 
 :file:`cloud.cfg` isn't present in any of ``cloud-init``'s source files. The
-`configuration is templated`_ and customised for each
+`configuration is templated`_ and customized for each
 distribution supported by ``cloud-init``.
 
 Base configuration keys
 =======================
+
+.. _base_config_module_keys:
 
 Module keys
 -----------
@@ -52,7 +54,7 @@ more information on ``frequency`` and ``args``.
 
 .. note::
     Most modules won't run at all if they're not triggered via a
-    respective user data key, so removing modules or changing the run
+    respective user-data key, so removing modules or changing the run
     frequency is **not** a recommended way to reduce instance boot time.
 
 Examples
@@ -73,7 +75,7 @@ To change the frequency from the default of ``ALWAYS`` to ``ONCE``:
     - [final_message, once]
 
 To include default arguments to the module (that may be overridden by
-user data):
+user-data):
 
 .. code-block:: yaml
 
@@ -86,7 +88,7 @@ Datasource keys
 ---------------
 
 Many datasources allow configuration of the datasource for use in
-querying the datasource for metadata using the ``datasource`` key.
+querying the datasource for meta-data using the ``datasource`` key.
 This configuration is datasource dependent and can be found under
 each datasource's respective :ref:`documentation<datasources>`. It will
 generally take the form of:
@@ -101,32 +103,32 @@ System info keys
 ----------------
 
 These keys are used for setup of ``cloud-init`` itself, or the datasource
-or distro. Anything under ``system_info`` cannot be overridden by vendor data,
-user data, or any other handlers or transforms. In some cases there may be a
+or distro. Anything under ``system_info`` cannot be overridden by vendor-data,
+user-data, or any other handlers or transforms. In some cases there may be a
 ``system_info`` key used for the distro, while the same key is used outside of
-``system_info`` for a user data module.
+``system_info`` for a user-data module.
 Both keys will be processed independently.
 
 * ``system_info``: Top-level key.
 
   - ``paths``: Definitions of common paths used by ``cloud-init``.
 
-    + ``cloud_dir``: Defaults to :file:`/var/lib/cloud`.
-    + ``templates_dir``: Defaults to :file:`/etc/cloud/templates`.
+    + ``cloud_dir``: Default: :file:`/var/lib/cloud`.
+    + ``templates_dir``: Default: :file:`/etc/cloud/templates`.
 
   - ``distro``: Name of distro being used.
   - ``default_user``: Defines the default user for the system using the same
-    user configuration as :ref:`Users and Groups<mod-users_groups>`. Note that
-    this CAN be overridden if a ``users`` configuration
+    user configuration as :ref:`Users and Groups<mod_cc_users_groups>`. Note
+    that this CAN be overridden if a ``users`` configuration
     is specified without a ``- default`` entry.
   - ``ntp_client``: The default NTP client for the distro. Takes the same
-    form as ``ntp_client`` defined in :ref:`NTP<mod-ntp>`.
+    form as ``ntp_client`` defined in :ref:`NTP<mod_cc_ntp>`.
   - ``package_mirrors``: Defines the package mirror info for apt.
   - ``ssh_svcname``: The SSH service name. For most distros this will be
     either ``ssh`` or ``sshd``.
   - ``network``: Top-level key for distro-specific networking configuration.
 
-    + ``renderers``: Prioritised list of networking configurations to try
+    + ``renderers``: Prioritized list of networking configurations to try
       on this system. The first valid entry found will be used.
       Options are:
 
@@ -138,7 +140,7 @@ Both keys will be processed independently.
       * ``netbsd``
       * ``openbsd``
 
-    + ``activators``: Prioritised list of networking tools to try to activate
+    + ``activators``: Prioritized list of networking tools to try to activate
       network on this system. The first valid entry found will be used.
       Options are:
 
@@ -147,6 +149,18 @@ Both keys will be processed independently.
       * ``network-manager``: For ``nmcli connection load``/
         ``nmcli connection up``.
       * ``networkd``: For ``ip link set up``/``ip link set down``.
+  - ``apt_get_command``: Command used to interact with APT repositories.
+    Default: ``apt-get``.
+  - ``apt_get_upgrade_subcommand``: APT subcommand used to upgrade system.
+    Default: ``dist-upgrade``.
+  - ``apt_get_wrapper``: Command used to wrap the apt-get command.
+
+    + ``enabled``: Whether to use the specified ``apt_wrapper`` command.
+      If set to ``auto``, use the command if it exists on the ``PATH``.
+      Default: ``true``.
+
+    + ``command``: Command used to wrap any ``apt-get`` calls.
+      Default: ``eatmydata``.
 
 Logging keys
 ------------
@@ -209,28 +223,37 @@ Other keys
 The :ref:`network configuration<network_config>` to be applied to this
 instance.
 
+.. _base_config_datasource_pkg_list:
+
 ``datasource_pkg_list``
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Prioritised list of python packages to search when finding a datasource.
+Prioritized list of python packages to search when finding a datasource.
 Automatically includes ``cloudinit.sources``.
+
+.. _base_config_datasource_list:
 
 ``datasource_list``
 ^^^^^^^^^^^^^^^^^^^
 
-Prioritised list of datasources that ``cloud-init`` will attempt to find on
-boot. By default, this will be defined in :file:`/etc/cloud/cloud.cfg.d`. There
-are two primary use cases for modifying the ``datasource_list``:
+This key contains a prioritized list of datasources that ``cloud-init``
+attempts to discover on boot. By default, this is defined in
+:file:`/etc/cloud/cloud.cfg.d`.
 
-1. Remove known invalid datasources. This may avoid long timeouts when
-   attempting to detect datasources on any system without a systemd-generator
-   hook that invokes ``ds-identify``.
-2. Override default datasource ordering to discover a different datasource
-   type than would typically be prioritised.
+There are a few reasons to modify the ``datasource_list``:
 
-If ``datasource_list`` has only a single entry (or a single entry + ``None``),
-:ref:`cloud-init's generator script<boot-Generator>` will automatically assume
-and use this datasource without attempting detection.
+1. Override default datasource discovery priority order
+2. Force cloud-init to use a specific datasource: A single entry in
+   the list (or a single entry and ``None``) will override datasource
+   discovery, which will force the specified datasource to run.
+3. Remove known invalid datasources: this might improve boot speed on distros
+   that do not use ``ds-identify`` to detect and select the datasource,
+
+.. warning::
+
+   This key is unique in that it uses a subset of YAML syntax. It **requires**
+   that the key and its contents, a list, must share a single line - no
+   newlines.
 
 ``vendor_data``/``vendor_data2``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -243,6 +266,21 @@ Format is a dict with ``enabled`` and ``prefix`` keys:
 * ``enabled``: A boolean indicating whether to enable or disable the
   ``vendor_data``.
 * ``prefix``: A path to prepend to any ``vendor_data``-provided script.
+
+``allow_userdata``
+^^^^^^^^^^^^^^^^^^
+
+A boolean value to disable the use of user-data.
+This allows custom images to prevent users from accidentally breaking closed
+appliances. Setting ``allow_userdata: false`` in the configuration will disable
+``cloud-init`` from processing user-data.
+
+``manual_cache_clean``
+^^^^^^^^^^^^^^^^^^^^^^
+
+By default, cloud-init searches for a datasource on every boot. Setting
+this to ``true`` will disable this behaviour. This is useful if your datasource
+information will not be present every boot. Default: ``false``.
 
 Example
 =======
@@ -277,10 +315,9 @@ On an Ubuntu system, :file:`/etc/cloud/cloud.cfg` should look similar to:
 
     # The modules that run in the 'init' stage
     cloud_init_modules:
-    - migrator
     - seed_random
     - bootcmd
-    - write-files
+    - write_files
     - growpart
     - resizefs
     - disk_setup
@@ -288,54 +325,55 @@ On an Ubuntu system, :file:`/etc/cloud/cloud.cfg` should look similar to:
     - set_hostname
     - update_hostname
     - update_etc_hosts
-    - ca-certs
+    - ca_certs
     - rsyslog
-    - users-groups
+    - users_groups
     - ssh
 
     # The modules that run in the 'config' stage
     cloud_config_modules:
+    - wireguard
     - snap
-    - ssh-import-id
+    - ubuntu_autoinstall
+    - ssh_import_id
     - keyboard
     - locale
-    - set-passwords
-    - grub-dpkg
-    - apt-pipelining
-    - apt-configure
-    - ubuntu-advantage
+    - set_passwords
+    - grub_dpkg
+    - apt_pipelining
+    - apt_configure
+    - ubuntu_pro
     - ntp
     - timezone
-    - disable-ec2-metadata
+    - disable_ec2_metadata
     - runcmd
     - byobu
 
     # The modules that run in the 'final' stage
     cloud_final_modules:
-    - package-update-upgrade-install
+    - package_update_upgrade_install
     - fan
     - landscape
     - lxd
-    - ubuntu-drivers
-    - write-files-deferred
+    - ubuntu_drivers
+    - write_files_deferred
     - puppet
     - chef
+    - ansible
     - mcollective
-    - salt-minion
+    - salt_minion
     - reset_rmc
-    - refresh_rmc_and_interface
-    - rightscale_userdata
-    - scripts-vendor
-    - scripts-per-once
-    - scripts-per-boot
-    - scripts-per-instance
-    - scripts-user
-    - ssh-authkey-fingerprints
-    - keys-to-console
-    - install-hotplug
-    - phone-home
-    - final-message
-    - power-state-change
+    - scripts_vendor
+    - scripts_per_once
+    - scripts_per_boot
+    - scripts_per_instance
+    - scripts_user
+    - ssh_authkey_fingerprints
+    - keys_to_console
+    - install_hotplug
+    - phone_home
+    - final_message
+    - power_state_change
 
     # System and/or distro specific settings
     # (not accessible to handlers/transforms)
@@ -345,13 +383,17 @@ On an Ubuntu system, :file:`/etc/cloud/cloud.cfg` should look similar to:
       # Default user name + that default users groups (if added/used)
       default_user:
         name: ubuntu
+        doas:
+          - permit nopass ubuntu
         lock_passwd: True
         gecos: Ubuntu
-        groups: [adm, audio, cdrom, dialout, dip, floppy, lxd, netdev, plugdev, sudo, video]
+        groups: [adm, cdrom, dip, lxd, sudo]
         sudo: ["ALL=(ALL) NOPASSWD:ALL"]
         shell: /bin/bash
       network:
+        dhcp_client_priority: [dhclient, dhcpcd, udhcpc]
         renderers: ['netplan', 'eni', 'sysconfig']
+        activators: ['netplan', 'eni', 'network-manager', 'networkd']
       # Automatically discover the best ntp_client
       ntp_client: auto
       # Other config here will be given to the distro class and/or path classes
@@ -384,6 +426,32 @@ On an Ubuntu system, :file:`/etc/cloud/cloud.cfg` should look similar to:
             primary: http://ports.ubuntu.com/ubuntu-ports
             security: http://ports.ubuntu.com/ubuntu-ports
       ssh_svcname: ssh
+
+    # configure where output will go
+    output:
+      init: "> /var/log/my-cloud-init.log"
+      config: [ ">> /tmp/foo.out", "> /tmp/foo.err" ]
+      final:
+        output: "| tee /tmp/final.stdout | tee /tmp/bar.stdout"
+        error: "&1"
+
+    # Set `true` to enable the stop searching for a datasource on boot.
+    manual_cache_clean: False
+
+    # def_log_file and syslog_fix_perms work together
+    # if
+    # - logging is set to go to a log file 'L' both with and without syslog
+    # - and 'L' does not exist
+    # - and syslog is configured to write to 'L'
+    # then 'L' will be initially created with root:root ownership (during
+    # cloud-init), and then at cloud-config time (when syslog is available)
+    # the syslog daemon will be unable to write to the file.
+    #
+    # to remedy this situation, 'def_log_file' can be set to a filename
+    # and syslog_fix_perms to a string containing "<user>:<group>"
+    def_log_file: /var/log/my-logging-file.log
+    syslog_fix_perms: syslog:root
+
 
 
 .. _configuration is templated: https://github.com/canonical/cloud-init/blob/main/config/cloud.cfg.tmpl

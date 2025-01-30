@@ -6,14 +6,12 @@
 
 """Apk Configure: Configures apk repositories file."""
 
-from logging import Logger
-from textwrap import dedent
+import logging
 
-from cloudinit import log as logging
 from cloudinit import temp_utils, templater, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
@@ -53,69 +51,19 @@ REPOSITORIES_TEMPLATE = """\
 
 """
 
-
-frequency = PER_INSTANCE
-distros = ["alpine"]
 meta: MetaSchema = {
     "id": "cc_apk_configure",
-    "name": "APK Configure",
-    "title": "Configure apk repositories file",
-    "description": dedent(
-        """\
-        This module handles configuration of the /etc/apk/repositories file.
-
-        .. note::
-          To ensure that apk configuration is valid yaml, any strings
-          containing special characters, especially ``:`` should be quoted.
-    """
-    ),
-    "distros": distros,
-    "examples": [
-        dedent(
-            """\
-        # Keep the existing /etc/apk/repositories file unaltered.
-        apk_repos:
-            preserve_repositories: true
-        """
-        ),
-        dedent(
-            """\
-        # Create repositories file for Alpine v3.12 main and community
-        # using default mirror site.
-        apk_repos:
-            alpine_repo:
-                community_enabled: true
-                version: 'v3.12'
-        """
-        ),
-        dedent(
-            """\
-        # Create repositories file for Alpine Edge main, community, and
-        # testing using a specified mirror site and also a local repo.
-        apk_repos:
-            alpine_repo:
-                base_url: 'https://some-alpine-mirror/alpine'
-                community_enabled: true
-                testing_enabled: true
-                version: 'edge'
-            local_repo_base_url: 'https://my-local-server/local-alpine'
-        """
-        ),
-    ],
-    "frequency": frequency,
+    "distros": ["alpine"],
+    "frequency": PER_INSTANCE,
     "activate_by_schema_keys": ["apk_repos"],
 }
 
-__doc__ = get_meta_doc(meta)
 
-
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     """
     Call to handle apk_repos sections in cloud-config file.
 
-    @param name: The module name "apk-configure" from cloud.cfg
+    @param name: The module name "apk_configure" from cloud.cfg
     @param cfg: A nested dict containing the entire cloud config contents.
     @param cloud: The CloudInit object in use.
     @param log: Pre-initialized Python logger object to use for logging.
@@ -193,6 +141,3 @@ def _write_repositories_file(alpine_repo, alpine_version, local_repo):
     templater.render_to_file(template_fn, repo_file, params)
     # Clean up temporary template
     util.del_file(template_fn)
-
-
-# vi: ts=4 expandtab

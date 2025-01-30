@@ -1,10 +1,10 @@
 import abc
 import logging
 import os
-from typing import List, Optional
 
-from cloudinit import net, subp, util
+from cloudinit import net, performance, subp, util
 from cloudinit.distros.parsers import ifconfig
+from cloudinit.net.netops.iproute2 import Iproute2
 
 LOG = logging.getLogger(__name__)
 
@@ -22,9 +22,6 @@ class Networking(metaclass=abc.ABCMeta):
     details see "``cloudinit.net`` -> ``cloudinit.distros.networking``
     Hierarchy" in CONTRIBUTING.rst for full details.
     """
-
-    def __init__(self):
-        self.blacklist_drivers: Optional[List[str]] = None
 
     def _get_current_rename_info(self) -> dict:
         return net._get_current_rename_info()
@@ -45,15 +42,11 @@ class Networking(metaclass=abc.ABCMeta):
     def extract_physdevs(self, netcfg: NetworkConfig) -> list:
         return net.extract_physdevs(netcfg)
 
-    def find_fallback_nic(self, *, blacklist_drivers=None):
-        return net.find_fallback_nic(blacklist_drivers=blacklist_drivers)
+    def find_fallback_nic(self):
+        return net.find_fallback_nic()
 
-    def generate_fallback_config(
-        self, *, blacklist_drivers=None, config_driver: bool = False
-    ):
-        return net.generate_fallback_config(
-            blacklist_drivers=blacklist_drivers, config_driver=config_driver
-        )
+    def generate_fallback_config(self, *, config_driver: bool = False):
+        return net.generate_fallback_config(config_driver=config_driver)
 
     def get_devicelist(self) -> list:
         return net.get_devicelist()
@@ -73,9 +66,7 @@ class Networking(metaclass=abc.ABCMeta):
         return net.get_interfaces()
 
     def get_interfaces_by_mac(self) -> dict:
-        return net.get_interfaces_by_mac(
-            blacklist_drivers=self.blacklist_drivers
-        )
+        return net.get_interfaces_by_mac()
 
     def get_master(self, devname: DeviceName):
         return net.get_master(devname)
@@ -152,7 +143,7 @@ class Networking(metaclass=abc.ABCMeta):
         # the current macs present; we only check MAC as cloud-init
         # has not yet renamed interfaces and the netcfg may include
         # such renames.
-        for _ in range(0, 5):
+        for _ in range(5):
             if expected_macs.issubset(present_macs):
                 LOG.debug("net: all expected physical devices present")
                 return
@@ -163,12 +154,8 @@ class Networking(metaclass=abc.ABCMeta):
                 # trigger a settle, unless this interface exists
                 devname = expected_ifaces[mac]
                 msg = "Waiting for settle or {} exists".format(devname)
-                util.log_time(
-                    LOG.debug,
-                    msg,
-                    func=self.settle,
-                    kwargs={"exists": devname},
-                )
+                with performance.Timed(msg, log_mode="always"):
+                    self.settle(exists=devname)
 
             # update present_macs after settles
             present_macs = self.get_interfaces_by_mac().keys()
@@ -188,16 +175,21 @@ class BSDNetworking(Networking):
 
     def __init__(self):
         self.ifc = ifconfig.Ifconfig()
-        self.ifs = {}
-        self._update_ifs()
+        self._ifs = {}
         super().__init__()
+
+    @property
+    def ifs(self) -> dict:
+        if not self._ifs:
+            self._update_ifs()
+        return self._ifs
 
     def _update_ifs(self):
         ifconf = subp.subp(["ifconfig", "-a"])
         # ``ifconfig -a`` always returns at least ``lo0``.
         # So this ``if`` is really just to make testing/mocking easier
         if ifconf[0]:
-            self.ifs = self.ifc.parse(ifconf[0])
+            self._ifs = self.ifc.parse(ifconf[0])
 
     def apply_network_config_names(self, netcfg: NetworkConfig) -> None:
         LOG.debug("Cannot rename network interface.")
@@ -309,5 +301,5 @@ class LinuxNetworking(Networking):
         """Try setting the link to up explicitly and return if it is up.
         Not guaranteed to bring the interface up. The caller is expected to
         add wait times before retrying."""
-        subp.subp(["ip", "link", "set", devname, "up"])
+        Iproute2.link_up(devname)
         return self.is_up(devname)
