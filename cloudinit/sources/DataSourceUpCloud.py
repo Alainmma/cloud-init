@@ -5,7 +5,8 @@
 # UpCloud server metadata API:
 # https://developers.upcloud.com/1.3/8-servers/#metadata-service
 
-from cloudinit import log as logging
+import logging
+
 from cloudinit import net as cloudnet
 from cloudinit import sources, util
 from cloudinit.net.dhcp import NoDHCPLeaseError
@@ -45,6 +46,7 @@ class DataSourceUpCloud(sources.DataSource):
         self.timeout = self.ds_cfg.get("timeout", MD_TIMEOUT)
         self.wait_retry = self.ds_cfg.get("wait_retry", MD_WAIT_RETRY)
         self._network_config = None
+        self.metadata_full = None
 
     def _get_sysinfo(self):
         return uc_helper.read_sysinfo()
@@ -71,14 +73,8 @@ class DataSourceUpCloud(sources.DataSource):
                 LOG.debug("Finding a fallback NIC")
                 nic = cloudnet.find_fallback_nic()
                 LOG.debug("Discovering metadata via DHCP interface %s", nic)
-                with EphemeralDHCPv4(
-                    nic, tmp_dir=self.distro.get_tmp_exec_path()
-                ):
-                    md = util.log_time(
-                        logfunc=LOG.debug,
-                        msg="Reading from metadata service",
-                        func=self._read_metadata,
-                    )
+                with EphemeralDHCPv4(self.distro, nic):
+                    md = self._read_metadata()
             except (NoDHCPLeaseError, sources.InvalidMetaDataException) as e:
                 util.logexc(LOG, str(e))
                 return False
@@ -87,11 +83,7 @@ class DataSourceUpCloud(sources.DataSource):
                 LOG.debug(
                     "Discovering metadata without DHCP-configured networking"
                 )
-                md = util.log_time(
-                    logfunc=LOG.debug,
-                    msg="Reading from metadata service",
-                    func=self._read_metadata,
-                )
+                md = self._read_metadata()
             except sources.InvalidMetaDataException as e:
                 util.logexc(LOG, str(e))
                 LOG.info(
@@ -128,7 +120,9 @@ class DataSourceUpCloud(sources.DataSource):
 
         raw_network_config = self.metadata.get("network")
         if not raw_network_config:
-            raise Exception("Unable to get network meta-data from server....")
+            raise RuntimeError(
+                "Unable to get network meta-data from server...."
+            )
 
         self._network_config = uc_helper.convert_network_config(
             raw_network_config,
@@ -160,6 +154,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

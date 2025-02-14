@@ -21,8 +21,22 @@ class TestMergeRun(helpers.FilesystemMockingTestCase):
         self.replicateTestRoot("simple_ubuntu", new_root)
         cfg = {
             "datasource_list": ["None"],
-            "cloud_init_modules": ["write-files"],
-            "system_info": {"paths": {"run_dir": new_root}},
+            "cloud_init_modules": ["write_files"],
+            "system_info": {
+                "paths": {"run_dir": new_root},
+                "package_mirrors": [
+                    {
+                        "arches": ["i386", "amd64", "blah"],
+                        "failsafe": {
+                            "primary": "http://my.archive.mydomain.com/ubuntu",
+                            "security": (
+                                "http://my.security.mydomain.com/ubuntu"
+                            ),
+                        },
+                        "search": {"primary": [], "security": []},
+                    },
+                ],
+            },
         }
         ud = helpers.readResource("user_data.1.txt")
         cloud_cfg = safeyaml.dumps(cfg)
@@ -52,11 +66,8 @@ class TestMergeRun(helpers.FilesystemMockingTestCase):
         self.assertEqual(mirror["arches"], ["i386", "amd64", "blah"])
         mods = Modules(initer)
         (which_ran, failures) = mods.run_section("cloud_init_modules")
-        self.assertTrue(len(failures) == 0)
+        self.assertFalse(failures)
         self.assertTrue(os.path.exists("/etc/blah.ini"))
-        self.assertIn("write-files", which_ran)
-        contents = util.load_file("/etc/blah.ini")
+        self.assertIn("write_files", which_ran)
+        contents = util.load_text_file("/etc/blah.ini")
         self.assertEqual(contents, "blah")
-
-
-# vi: ts=4 expandtab

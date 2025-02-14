@@ -4,12 +4,14 @@ Ensure an ephemeral disk exists after boot.
 
 See https://github.com/canonical/cloud-init/pull/800
 """
+
 import pytest
 
 from tests.integration_tests.clouds import IntegrationCloud
+from tests.integration_tests.integration_settings import PLATFORM
 
 
-@pytest.mark.azure
+@pytest.mark.skipif(PLATFORM != "azure", reason="Test is Azure specific")
 @pytest.mark.parametrize(
     "instance_type,is_ephemeral",
     [
@@ -18,7 +20,7 @@ from tests.integration_tests.clouds import IntegrationCloud
     ],
 )
 def test_ephemeral(
-    instance_type, is_ephemeral, session_cloud: IntegrationCloud, setup_image
+    instance_type, is_ephemeral, session_cloud: IntegrationCloud
 ):
     if is_ephemeral:
         expected_log = (

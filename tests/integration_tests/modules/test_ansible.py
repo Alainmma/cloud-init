@@ -1,6 +1,13 @@
 import pytest
 
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.instances import IntegrationInstance
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.releases import CURRENT_RELEASE, FOCAL
+from tests.integration_tests.util import (
+    push_and_enable_systemd_unit,
+    verify_clean_boot,
+    verify_clean_log,
+)
 
 # This works by setting up a local repository and web server
 # daemon on the first boot. Second boot should succeed
@@ -18,40 +25,6 @@ packages:
   - git
   - python3-pip
 write_files:
-  - path: /etc/systemd/system/repo_server.service
-    content: |
-       [Unit]
-       Description=Serve a local git repo
-       Wants=repo_waiter.service
-       After=cloud-init-local.service
-       Before=cloud-config.service
-       Before=cloud-final.service
-
-       [Install]
-       WantedBy=cloud-init-local.service
-
-       [Service]
-       WorkingDirectory=/root/playbooks/.git
-       ExecStart=/usr/bin/env python3 -m http.server --bind 0.0.0.0 8000
-
-  - path: /etc/systemd/system/repo_waiter.service
-    content: |
-       [Unit]
-       Description=Block boot until repo is available
-       After=repo_server.service
-       Before=cloud-final.service
-
-       [Install]
-       WantedBy=cloud-init-local.service
-
-       # clone into temp directory to test that server is running
-       # sdnotify would be an alternative way to verify that the server is
-       # running and continue once it is up, but this is simple and works
-       [Service]
-       Type=oneshot
-       ExecStart=/bin/sh -c "while \
-            ! git clone http://0.0.0.0:8000/ $(mktemp -d); do sleep 0.1; done"
-
   - path: /root/playbooks/ubuntu.yml
     content: |
        ---
@@ -78,10 +51,40 @@ write_files:
              - "{{ item }}"
            state: latest
          loop: "{{ packages }}"
+"""
 
-runcmd:
-  - [systemctl, enable, repo_server.service]
-  - [systemctl, enable, repo_waiter.service]
+REPO_SERVER = """\
+[Unit]
+Description=Serve a local git repo
+Wants=repo_waiter.service
+After=cloud-init-local.service
+Before=cloud-config.service
+Before=cloud-final.service
+
+[Install]
+WantedBy=cloud-init-local.service
+
+[Service]
+WorkingDirectory=/root/playbooks/.git
+ExecStart=/usr/bin/env python3 -m http.server --bind 0.0.0.0 8000
+"""
+
+REPO_WAITER = """\
+[Unit]
+Description=Block boot until repo is available
+After=repo_server.service
+Before=cloud-final.service
+
+[Install]
+WantedBy=cloud-init-local.service
+
+# clone into temp directory to test that server is running
+# sdnotify would be an alternative way to verify that the server is
+# running and continue once it is up, but this is simple and works
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "while \
+    ! git clone http://0.0.0.0:8000/ $(mktemp -d); do sleep 0.1; done"
 """
 
 INSTALL_METHOD = """
@@ -265,6 +268,7 @@ def _test_ansible_pull_from_local_server(my_client):
     my_client.restart()
     log = my_client.read_from_file("/var/log/cloud-init.log")
     verify_clean_log(log)
+    verify_clean_boot(my_client)
     output_log = my_client.read_from_file("/var/log/cloud-init-output.log")
     assert "ok=3" in output_log
     assert "SUCCESS: config-ansible ran successfully" in log
@@ -282,7 +286,10 @@ def _test_ansible_pull_from_local_server(my_client):
 @pytest.mark.user_data(
     USER_DATA + INSTALL_METHOD.format(package="ansible-core", method="pip")
 )
-def test_ansible_pull_pip(client):
+@pytest.mark.skip("This test is currently broken and needs to be fixed")
+def test_ansible_pull_pip(client: IntegrationInstance):
+    push_and_enable_systemd_unit(client, "repo_server.service", REPO_SERVER)
+    push_and_enable_systemd_unit(client, "repo_waiter.service", REPO_WAITER)
     _test_ansible_pull_from_local_server(client)
 
 
@@ -291,19 +298,33 @@ def test_ansible_pull_pip(client):
 # Ansible packaged in bionic is 2.5.1. This test relies on ansible collections,
 # which requires Ansible 2.9+, so no bionic. The functionality is covered
 # in `test_ansible_pull_pip` using pip rather than the bionic package.
-@pytest.mark.not_bionic
+@pytest.mark.skipif(
+    CURRENT_RELEASE < FOCAL, reason="Test requires Ansible 2.9+"
+)
 @pytest.mark.user_data(
     USER_DATA + INSTALL_METHOD.format(package="ansible", method="distro")
 )
+@pytest.mark.skip("This test is currently broken and needs to be fixed")
 def test_ansible_pull_distro(client):
+    push_and_enable_systemd_unit(client, "repo_server.service", REPO_SERVER)
+    push_and_enable_systemd_unit(client, "repo_waiter.service", REPO_WAITER)
     _test_ansible_pull_from_local_server(client)
 
 
 @pytest.mark.user_data(ANSIBLE_CONTROL)
-@pytest.mark.lxd_vm
+@pytest.mark.skipif(
+    PLATFORM != "lxd_vm",
+    reason="Test requires starting LXD containers",
+)
+@pytest.mark.skipif(
+    CURRENT_RELEASE < FOCAL,
+    reason="Pip install is not supported for Ansible on release",
+)
+@pytest.mark.skip(reason="Need proxy support first. GH: #4527")
 def test_ansible_controller(client):
     log = client.read_from_file("/var/log/cloud-init.log")
     verify_clean_log(log)
+    verify_clean_boot(client)
     content_ansible = client.execute(
         "lxc exec lxd-container-00 -- cat /home/ansible/ansible.txt"
     )

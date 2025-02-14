@@ -4,121 +4,30 @@
 
 """Snap: Install, configure and manage snapd and snap packages."""
 
+import logging
 import os
-import sys
-from logging import Logger
-from textwrap import dedent
 
-from cloudinit import log as logging
 from cloudinit import subp, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 from cloudinit.subp import prepend_base_command
-
-distros = ["ubuntu"]
-frequency = PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
 
 meta: MetaSchema = {
     "id": "cc_snap",
-    "name": "Snap",
-    "title": "Install, configure and manage snapd and snap packages",
-    "description": dedent(
-        """\
-        This module provides a simple configuration namespace in cloud-init to
-        both setup snapd and install snaps.
-
-        .. note::
-            Both ``assertions`` and ``commands`` values can be either a
-            dictionary or a list. If these configs are provided as a
-            dictionary, the keys are only used to order the execution of the
-            assertions or commands and the dictionary is merged with any
-            vendor-data snap configuration provided. If a list is provided by
-            the user instead of a dict, any vendor-data snap configuration is
-            ignored.
-
-        The ``assertions`` configuration option is a dictionary or list of
-        properly-signed snap assertions which will run before any snap
-        ``commands``. They will be added to snapd's assertion database by
-        invoking ``snap ack <aggregate_assertion_file>``.
-
-        Snap ``commands`` is a dictionary or list of individual snap
-        commands to run on the target system. These commands can be used to
-        create snap users, install snaps and provide snap configuration.
-
-        .. note::
-            If 'side-loading' private/unpublished snaps on an instance, it is
-            best to create a snap seed directory and seed.yaml manifest in
-            **/var/lib/snapd/seed/** which snapd automatically installs on
-            startup.
-        """
-    ),
-    "distros": distros,
-    "examples": [
-        dedent(
-            """\
-        snap:
-            assertions:
-              00: |
-                signed_assertion_blob_here
-              02: |
-                signed_assertion_blob_here
-            commands:
-              00: snap create-user --sudoer --known <snap-user>@mydomain.com
-              01: snap install canonical-livepatch
-              02: canonical-livepatch enable <AUTH_TOKEN>
-    """
-        ),
-        dedent(
-            """\
-        # Convenience: the snap command can be omitted when specifying commands
-        # as a list and 'snap' will automatically be prepended.
-        # The following commands are equivalent:
-        snap:
-          commands:
-            00: ['install', 'vlc']
-            01: ['snap', 'install', 'vlc']
-            02: snap install vlc
-            03: 'snap install vlc'
-    """
-        ),
-        dedent(
-            """\
-        # You can use a list of commands
-        snap:
-          commands:
-            - ['install', 'vlc']
-            - ['snap', 'install', 'vlc']
-            - snap install vlc
-            - 'snap install vlc'
-    """
-        ),
-        dedent(
-            """\
-        # You can use a list of assertions
-        snap:
-          assertions:
-            - signed_assertion_blob_here
-            - |
-              signed_assertion_blob_here
-    """
-        ),
-    ],
+    "distros": ["ubuntu"],
     "frequency": PER_INSTANCE,
     "activate_by_schema_keys": ["snap"],
 }
-
-
-__doc__ = get_meta_doc(meta)
 
 SNAP_CMD = "snap"
 
 
 def add_assertions(assertions, assertions_file):
-    """Import list of assertions.
+    r"""Import list of assertions.
 
     Import assertions by concatenating each assertion into a
     string separated by a '\n'.  Write this string to a instance file and
@@ -175,7 +84,7 @@ def run_commands(commands):
     for command in fixed_snap_commands:
         shell = isinstance(command, str)
         try:
-            subp.subp(command, shell=shell, status_cb=sys.stderr.write)
+            subp.subp(command, shell=shell)
         except subp.ProcessExecutionError as e:
             cmd_failures.append(str(e))
     if cmd_failures:
@@ -186,21 +95,16 @@ def run_commands(commands):
         raise RuntimeError(msg)
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     cfgin = cfg.get("snap", {})
     if not cfgin:
         LOG.debug(
             "Skipping module named %s, no 'snap' key in configuration", name
         )
         return
-
+    util.wait_for_snap_seeded(cloud)
     add_assertions(
         cfgin.get("assertions", []),
         os.path.join(cloud.paths.get_ipath_cur(), "snapd.assertions"),
     )
     run_commands(cfgin.get("commands", []))
-
-
-# vi: ts=4 expandtab

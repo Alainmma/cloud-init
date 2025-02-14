@@ -14,9 +14,11 @@ init-local but, of course, before networking is up), and so doesn't generate
 the traceback that they cause.  We work around this by calling
 ``get_interfaces_by_mac` directly in the test code.
 """
+
 import pytest
 
 from tests.integration_tests import random_mac_address
+from tests.integration_tests.integration_settings import PLATFORM
 
 MAC_ADDRESS = random_mac_address()
 
@@ -85,7 +87,10 @@ def ovs_enabled_session_cloud(session_cloud):
         session_cloud.snapshot_id = old_snapshot_id
 
 
-@pytest.mark.lxd_vm
+@pytest.mark.skipif(
+    PLATFORM != "lxd_vm",
+    reason="Test requires custom networking provided by LXD",
+)
 def test_get_interfaces_by_mac_doesnt_traceback(ovs_enabled_session_cloud):
     """Launch our OVS-enabled image and confirm the bug doesn't reproduce."""
     launch_kwargs = {

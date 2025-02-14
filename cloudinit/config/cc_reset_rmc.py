@@ -3,21 +3,8 @@
 # Author: Aman Kumar Sinha <amansi26@in.ibm.com>
 #
 # This file is part of cloud-init. See LICENSE file for license information.
-"""Reset RMC: Reset rsct node id"""
+"""Reset RMC: Reset rsct node id
 
-
-import os
-from logging import Logger
-
-from cloudinit import log as logging
-from cloudinit import subp, util
-from cloudinit.cloud import Cloud
-from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema
-from cloudinit.distros import ALL_DISTROS
-from cloudinit.settings import PER_INSTANCE
-
-MODULE_DESCRIPTION = """\
 Reset RMC module is IBM PowerVM Hypervisor specific
 
 Reliable Scalable Cluster Technology (RSCT) is a set of software components,
@@ -37,15 +24,20 @@ This module handles
 
 Prerequisite of using this module is to install RSCT packages.
 """
+import logging
+import os
+
+from cloudinit import subp, util
+from cloudinit.cloud import Cloud
+from cloudinit.config import Config
+from cloudinit.config.schema import MetaSchema
+from cloudinit.distros import ALL_DISTROS
+from cloudinit.settings import PER_INSTANCE
 
 meta: MetaSchema = {
     "id": "cc_reset_rmc",
-    "name": "Reset RMC",
-    "title": "reset rsct node id",
-    "description": MODULE_DESCRIPTION,
     "distros": [ALL_DISTROS],
     "frequency": PER_INSTANCE,
-    "examples": [],
     "activate_by_schema_keys": [],
 }
 
@@ -65,9 +57,7 @@ LOG = logging.getLogger(__name__)
 NODE_ID_FILE = "/etc/ct_node_id"
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     # Ensuring node id has to be generated only once during first boot
     if cloud.datasource.platform_type == "none":
         LOG.debug("Skipping creation of new ct_node_id node")
@@ -103,7 +93,7 @@ def reconfigure_rsct_subsystems():
 
 def get_node_id():
     try:
-        fp = util.load_file(NODE_ID_FILE)
+        fp = util.load_text_file(NODE_ID_FILE)
         node_id = fp.split("\n")[0]
         return node_id
     except Exception:
@@ -149,4 +139,4 @@ def reset_rmc():
     if node_id_after == node_id_before:
         msg = "New node ID did not get generated."
         LOG.error(msg)
-        raise Exception(msg)
+        raise RuntimeError(msg)

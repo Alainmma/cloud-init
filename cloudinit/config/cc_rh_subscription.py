@@ -5,87 +5,28 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 """Red Hat Subscription: Register Red Hat Enterprise Linux based system"""
 
-from logging import Logger
-from textwrap import dedent
+import logging
 
-from cloudinit import log as logging
 from cloudinit import subp, util
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
 
-MODULE_DESCRIPTION = """\
-Register a Red Hat system either by username and password *or* activation and
-org. Following a successful registration, you can:
-
- - auto-attach subscriptions
- - set the service level
- - add subscriptions based on pool id
- - enable/disable yum repositories based on repo id
- - alter the rhsm_baseurl and server-hostname in ``/etc/rhsm/rhs.conf``.
-"""
-
 meta: MetaSchema = {
     "id": "cc_rh_subscription",
-    "name": "Red Hat Subscription",
-    "title": "Register Red Hat Enterprise Linux based system",
-    "description": MODULE_DESCRIPTION,
-    "distros": ["fedora", "rhel"],
+    "distros": ["fedora", "rhel", "openeuler"],
     "frequency": PER_INSTANCE,
-    "examples": [
-        dedent(
-            """\
-            rh_subscription:
-                username: joe@foo.bar
-                ## Quote your password if it has symbols to be safe
-                password: '1234abcd'
-            """
-        ),
-        dedent(
-            """\
-            rh_subscription:
-                activation-key: foobar
-                org: 12345
-            """
-        ),
-        dedent(
-            """\
-            rh_subscription:
-                activation-key: foobar
-                org: 12345
-                auto-attach: true
-                service-level: self-support
-                add-pool:
-                  - 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
-                  - 2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b
-                enable-repo:
-                  - repo-id-to-enable
-                  - other-repo-id-to-enable
-                disable-repo:
-                  - repo-id-to-disable
-                  - other-repo-id-to-disable
-                # Alter the baseurl in /etc/rhsm/rhsm.conf
-                rhsm-baseurl: http://url
-                # Alter the server hostname in /etc/rhsm/rhsm.conf
-                server-hostname: foo.bar.com
-            """
-        ),
-    ],
     "activate_by_schema_keys": ["rh_subscription"],
 }
 
-__doc__ = get_meta_doc(meta)
 
-
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
-    sm = SubscriptionManager(cfg, log=log)
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
+    sm = SubscriptionManager(cfg, log=LOG)
     if not sm.is_configured():
-        log.debug("%s: module not configured.", name)
+        LOG.debug("%s: module not configured.", name)
         return None
 
     if not sm.is_registered():
@@ -389,7 +330,7 @@ class SubscriptionManager:
         """
 
         # An empty list was passed
-        if len(pools) == 0:
+        if not pools:
             self.log.debug("No pools to attach")
             return True
 
@@ -438,7 +379,7 @@ class SubscriptionManager:
             return False
 
         # Bail if both lists are not populated
-        if (len(erepos) == 0) and (len(drepos) == 0):
+        if not (erepos) and not (drepos):
             self.log.debug("No repo IDs to enable or disable")
             return True
 
@@ -508,11 +449,8 @@ class SubscriptionManager:
 
 def _sub_man_cli(cmd, logstring_val=False):
     """
-    Uses the prefered cloud-init subprocess def of subp.subp
+    Uses the preferred cloud-init subprocess def of subp.subp
     and runs subscription-manager.  Breaking this to a
     separate function for later use in mocking and unittests
     """
     return subp.subp(["subscription-manager"] + cmd, logstring=logstring_val)
-
-
-# vi: ts=4 expandtab

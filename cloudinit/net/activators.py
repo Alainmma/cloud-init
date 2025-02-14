@@ -1,14 +1,13 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Iterable, List, Optional, Type, Union
+from functools import partial
+from typing import Callable, Dict, Iterable, List, Optional, Type, Union
 
 from cloudinit import subp, util
-from cloudinit.net.eni import available as eni_available
-from cloudinit.net.netplan import available as netplan_available
-from cloudinit.net.network_manager import available as nm_available
+from cloudinit.net import eni, netplan, network_manager, networkd
+from cloudinit.net.netops.iproute2 import Iproute2
 from cloudinit.net.network_state import NetworkState
-from cloudinit.net.networkd import available as networkd_available
 
 LOG = logging.getLogger(__name__)
 
@@ -17,15 +16,29 @@ class NoActivatorException(Exception):
     pass
 
 
-def _alter_interface(cmd, device_name) -> bool:
-    LOG.debug("Attempting command %s for device %s", cmd, device_name)
+def _alter_interface(
+    cmd: list, device_name: str, warn_on_stderr: bool = True
+) -> bool:
+    """Attempt to alter an interface using a command list"""
+    return _alter_interface_callable(partial(subp.subp, cmd), warn_on_stderr)
+
+
+def _alter_interface_callable(
+    callable: Callable, warn_on_stderr: bool = True
+) -> bool:
+    """Attempt to alter an interface using a callable
+
+    this function standardizes logging and response to failure for
+    various activators
+    """
     try:
-        (_out, err) = subp.subp(cmd)
+        _out, err = callable()
         if len(err):
-            LOG.warning("Running %s resulted in stderr output: %s", cmd, err)
+            log_stderr = LOG.warning if warn_on_stderr else LOG.debug
+            log_stderr("Received stderr output: %s", err)
         return True
-    except subp.ProcessExecutionError:
-        util.logexc(LOG, "Running interface command %s failed", cmd)
+    except subp.ProcessExecutionError as e:
+        util.logexc(LOG, "Running interface command %s failed", e.cmd)
         return False
 
 
@@ -72,23 +85,10 @@ class NetworkActivator(ABC):
             [i["name"] for i in network_state.iter_interfaces()]
         )
 
-    @classmethod
-    def bring_down_interfaces(cls, device_names: Iterable[str]) -> bool:
-        """Bring down specified list of interfaces.
-
-        Return True is successful, otherwise return False
-        """
-        return all(cls.bring_down_interface(device) for device in device_names)
-
-    @classmethod
-    def bring_down_all_interfaces(cls, network_state: NetworkState) -> bool:
-        """Bring down all interfaces.
-
-        Return True is successful, otherwise return False
-        """
-        return cls.bring_down_interfaces(
-            [i["name"] for i in network_state.iter_interfaces()]
-        )
+    @staticmethod
+    def wait_for_network() -> None:
+        """Wait for network to come up."""
+        raise NotImplementedError()
 
 
 class IfUpDownActivator(NetworkActivator):
@@ -99,7 +99,7 @@ class IfUpDownActivator(NetworkActivator):
     @staticmethod
     def available(target: Optional[str] = None) -> bool:
         """Return true if ifupdown can be used on this system."""
-        return eni_available(target=target)
+        return eni.available(target=target)
 
     @staticmethod
     def bring_up_interface(device_name: str) -> bool:
@@ -120,11 +120,38 @@ class IfUpDownActivator(NetworkActivator):
         return _alter_interface(cmd, device_name)
 
 
+class IfConfigActivator(NetworkActivator):
+    @staticmethod
+    def available(target=None) -> bool:
+        """Return true if ifconfig can be used on this system."""
+        expected = "ifconfig"
+        search = ["/sbin"]
+        return bool(subp.which(expected, search=search, target=target))
+
+    @staticmethod
+    def bring_up_interface(device_name: str) -> bool:
+        """Bring up interface using ifconfig <dev> up.
+
+        Return True is successful, otherwise return False
+        """
+        cmd = ["ifconfig", device_name, "up"]
+        return _alter_interface(cmd, device_name)
+
+    @staticmethod
+    def bring_down_interface(device_name: str) -> bool:
+        """Bring up interface using ifconfig <dev> down.
+
+        Return True is successful, otherwise return False
+        """
+        cmd = ["ifconfig", device_name, "down"]
+        return _alter_interface(cmd, device_name)
+
+
 class NetworkManagerActivator(NetworkActivator):
     @staticmethod
     def available(target=None) -> bool:
         """Return true if NetworkManager can be used on this system."""
-        return nm_available(target=target)
+        return network_manager.available(target=target)
 
     @staticmethod
     def bring_up_interface(device_name: str) -> bool:
@@ -135,6 +162,13 @@ class NetworkManagerActivator(NetworkActivator):
         from cloudinit.net.network_manager import conn_filename
 
         filename = conn_filename(device_name)
+        if filename is None:
+            LOG.warning(
+                "Unable to find an interface config file. "
+                "Unable to bring up interface."
+            )
+            return False
+
         cmd = ["nmcli", "connection", "load", filename]
         if _alter_interface(cmd, device_name):
             cmd = ["nmcli", "connection", "up", "filename", filename]
@@ -152,6 +186,30 @@ class NetworkManagerActivator(NetworkActivator):
         cmd = ["nmcli", "device", "disconnect", device_name]
         return _alter_interface(cmd, device_name)
 
+    @classmethod
+    def bring_up_interfaces(cls, device_names: Iterable[str]) -> bool:
+        """Activate network
+
+        Return True on success
+        """
+        state = subp.subp(
+            [
+                "systemctl",
+                "show",
+                "--property=SubState",
+                "NetworkManager.service",
+            ]
+        ).stdout.rstrip()
+        if "SubState=running" != state:
+            LOG.warning(
+                "Expected NetworkManager SubState=running, but detected: %s",
+                state,
+            )
+        return _alter_interface(
+            ["systemctl", "reload-or-try-restart", "NetworkManager.service"],
+            "all",
+        )
+
 
 class NetplanActivator(NetworkActivator):
     NETPLAN_CMD = ["netplan", "apply"]
@@ -159,7 +217,7 @@ class NetplanActivator(NetworkActivator):
     @staticmethod
     def available(target=None) -> bool:
         """Return true if netplan can be used on this system."""
-        return netplan_available(target=target)
+        return netplan.available(target=target)
 
     @staticmethod
     def bring_up_interface(device_name: str) -> bool:
@@ -171,7 +229,9 @@ class NetplanActivator(NetworkActivator):
             "Calling 'netplan apply' rather than "
             "altering individual interfaces"
         )
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
+        return _alter_interface(
+            NetplanActivator.NETPLAN_CMD, "all", warn_on_stderr=False
+        )
 
     @staticmethod
     def bring_up_interfaces(device_names: Iterable[str]) -> bool:
@@ -183,7 +243,9 @@ class NetplanActivator(NetworkActivator):
             "Calling 'netplan apply' rather than "
             "altering individual interfaces"
         )
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
+        return _alter_interface(
+            NetplanActivator.NETPLAN_CMD, "all", warn_on_stderr=False
+        )
 
     @staticmethod
     def bring_up_all_interfaces(network_state: NetworkState) -> bool:
@@ -191,7 +253,9 @@ class NetplanActivator(NetworkActivator):
 
         Return True is successful, otherwise return False
         """
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
+        return _alter_interface(
+            NetplanActivator.NETPLAN_CMD, "all", warn_on_stderr=False
+        )
 
     @staticmethod
     def bring_down_interface(device_name: str) -> bool:
@@ -203,40 +267,32 @@ class NetplanActivator(NetworkActivator):
             "Calling 'netplan apply' rather than "
             "altering individual interfaces"
         )
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
-
-    @staticmethod
-    def bring_down_interfaces(device_names: Iterable[str]) -> bool:
-        """Apply netplan config.
-
-        Return True is successful, otherwise return False
-        """
-        LOG.debug(
-            "Calling 'netplan apply' rather than "
-            "altering individual interfaces"
+        return _alter_interface(
+            NetplanActivator.NETPLAN_CMD, "all", warn_on_stderr=False
         )
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
 
     @staticmethod
-    def bring_down_all_interfaces(network_state: NetworkState) -> bool:
-        """Apply netplan config.
-
-        Return True is successful, otherwise return False
-        """
-        return _alter_interface(NetplanActivator.NETPLAN_CMD, "all")
+    def wait_for_network() -> None:
+        """On networkd systems, wait for systemd-networkd-wait-online"""
+        # At the moment, this is only supported using the networkd renderer.
+        if network_manager.available():
+            LOG.debug("NetworkManager is enabled, skipping networkd wait")
+            return
+        NetworkdActivator.wait_for_network()
 
 
 class NetworkdActivator(NetworkActivator):
     @staticmethod
     def available(target=None) -> bool:
         """Return true if ifupdown can be used on this system."""
-        return networkd_available(target=target)
+        return networkd.available(target=target)
 
     @staticmethod
     def bring_up_interface(device_name: str) -> bool:
         """Return True is successful, otherwise return False"""
-        cmd = ["ip", "link", "set", "up", device_name]
-        return _alter_interface(cmd, device_name)
+        return _alter_interface_callable(
+            partial(Iproute2.link_up, device_name)
+        )
 
     @staticmethod
     def bring_up_all_interfaces(network_state: NetworkState) -> bool:
@@ -247,8 +303,16 @@ class NetworkdActivator(NetworkActivator):
     @staticmethod
     def bring_down_interface(device_name: str) -> bool:
         """Return True is successful, otherwise return False"""
-        cmd = ["ip", "link", "set", "down", device_name]
-        return _alter_interface(cmd, device_name)
+        return _alter_interface_callable(
+            partial(Iproute2.link_down, device_name)
+        )
+
+    @staticmethod
+    def wait_for_network() -> None:
+        """Wait for systemd-networkd-wait-online."""
+        subp.subp(
+            ["systemctl", "start", "systemd-networkd-wait-online.service"]
+        )
 
 
 # This section is mostly copied and pasted from renderers.py. An abstract
@@ -258,6 +322,7 @@ DEFAULT_PRIORITY = [
     "netplan",
     "network-manager",
     "networkd",
+    "ifconfig",
 ]
 
 NAME_TO_ACTIVATOR: Dict[str, Type[NetworkActivator]] = {
@@ -265,23 +330,28 @@ NAME_TO_ACTIVATOR: Dict[str, Type[NetworkActivator]] = {
     "netplan": NetplanActivator,
     "network-manager": NetworkManagerActivator,
     "networkd": NetworkdActivator,
+    "ifconfig": IfConfigActivator,
 }
 
 
 def search_activator(
     priority: List[str], target: Union[str, None]
-) -> List[Type[NetworkActivator]]:
+) -> Optional[Type[NetworkActivator]]:
+    """Returns the first available activator from the priority list or None."""
     unknown = [i for i in priority if i not in DEFAULT_PRIORITY]
     if unknown:
         raise ValueError(
-            "Unknown activators provided in priority list: %s" % unknown
+            f"Unknown activators provided in priority list: {unknown}"
         )
     activator_classes = [NAME_TO_ACTIVATOR[name] for name in priority]
-    return [
-        activator_cls
-        for activator_cls in activator_classes
-        if activator_cls.available(target)
-    ]
+    return next(
+        (
+            activator_cls
+            for activator_cls in activator_classes
+            if activator_cls.available(target)
+        ),
+        None,
+    )
 
 
 def select_activator(
@@ -289,16 +359,13 @@ def select_activator(
 ) -> Type[NetworkActivator]:
     if priority is None:
         priority = DEFAULT_PRIORITY
-    found = search_activator(priority, target)
-    if not found:
-        tmsg = ""
-        if target and target != "/":
-            tmsg = " in target=%s" % target
+    selected = search_activator(priority, target)
+    if not selected:
+        tmsg = f" in target={target}" if target and target != "/" else ""
         raise NoActivatorException(
-            "No available network activators found%s. Searched "
-            "through list: %s" % (tmsg, priority)
+            f"No available network activators found{tmsg}. "
+            f"Searched through list: {priority}"
         )
-    selected = found[0]
     LOG.debug(
         "Using selected activator: %s from priority: %s", selected, priority
     )

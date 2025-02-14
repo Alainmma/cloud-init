@@ -1,22 +1,25 @@
 # This file is part of cloud-init.  See LICENSE file ...
 
 import copy
-import ipaddress
+import io
+import logging
 import os
 import textwrap
-from typing import Optional, cast
+from tempfile import SpooledTemporaryFile
+from typing import Callable, List, Optional
 
-from cloudinit import features
-from cloudinit import log as logging
-from cloudinit import safeyaml, subp, util
+from cloudinit import features, safeyaml, subp, util
 from cloudinit.net import (
     IPV6_DYNAMIC_TYPES,
     SYS_CLASS_NET,
     get_devicelist,
     renderer,
+    should_add_gateway_onlink_flag,
     subnet_is_ipv6,
 )
 from cloudinit.net.network_state import NET_CONFIG_TO_V2, NetworkState
+
+CLOUDINIT_NETPLAN_FILE = "/etc/netplan/50-cloud-init.yaml"
 
 KNOWN_SNAPD_CONFIG = b"""\
 # This is the initial network config.
@@ -45,7 +48,7 @@ def _get_params_dict_by_match(config, match):
     )
 
 
-def _extract_addresses(config: dict, entry: dict, ifname, features=None):
+def _extract_addresses(config: dict, entry: dict, ifname, features: Callable):
     """This method parse a cloudinit.net.network_state dictionary (config) and
        maps netstate keys/values into a dictionary (entry) to represent
        netplan yaml. (config v1 -> netplan)
@@ -95,8 +98,6 @@ def _extract_addresses(config: dict, entry: dict, ifname, features=None):
                 obj,
             ]
 
-    if features is None:
-        features = []
     addresses = []
     routes = []
     nameservers = []
@@ -121,28 +122,17 @@ def _extract_addresses(config: dict, entry: dict, ifname, features=None):
                     "via": subnet.get("gateway"),
                     "to": "default",
                 }
-                try:
-                    subnet_gateway = ipaddress.ip_address(subnet["gateway"])
-                    subnet_network = ipaddress.ip_network(addr, strict=False)
-                    # If the gateway is not contained within the subnet's
-                    # network, mark it as on-link so that it can still be
-                    # reached.
-                    if subnet_gateway not in subnet_network:
-                        LOG.debug(
-                            "Gateway %s is not contained within subnet %s,"
-                            " adding on-link flag",
-                            subnet["gateway"],
-                            addr,
-                        )
-                        new_route["on-link"] = True
-                except ValueError as e:
-                    LOG.warning(
-                        "Failed to check whether gateway %s"
-                        " is contained within subnet %s: %s",
+                # If the gateway is not contained within the subnet's
+                # network, mark it as on-link so that it can still be
+                # reached.
+                if should_add_gateway_onlink_flag(subnet["gateway"], addr):
+                    LOG.debug(
+                        "Gateway %s is not contained within subnet %s,"
+                        " adding on-link flag",
                         subnet["gateway"],
                         addr,
-                        e,
                     )
+                    new_route["on-link"] = True
                 routes.append(new_route)
             if "dns_nameservers" in subnet:
                 nameservers += _listify(subnet.get("dns_nameservers", []))
@@ -150,7 +140,7 @@ def _extract_addresses(config: dict, entry: dict, ifname, features=None):
                 searchdomains += _listify(subnet.get("dns_search", []))
             if "mtu" in subnet:
                 mtukey = "mtu"
-                if subnet_is_ipv6(subnet) and "ipv6-mtu" in features:
+                if subnet_is_ipv6(subnet) and "ipv6-mtu" in features():
                     mtukey = "ipv6-mtu"
                 entry.update({mtukey: subnet.get("mtu")})
             for route in subnet.get("routes", []):
@@ -210,7 +200,7 @@ def _clean_default(target=None):
     tpath = subp.target_path(target, "etc/netplan/00-snapd-config.yaml")
     if not os.path.isfile(tpath):
         return
-    content = util.load_file(tpath, decode=False)
+    content = util.load_binary_file(tpath)
     if content != KNOWN_SNAPD_CONFIG:
         return
 
@@ -233,6 +223,79 @@ def _clean_default(target=None):
         os.unlink(f)
 
 
+def netplan_api_write_yaml_file(net_config_content: str) -> bool:
+    """Use netplan.State._write_yaml_file to write netplan config
+
+    Where netplan python API exists, prefer to use of the private
+    _write_yaml_file to ensure proper permissions and file locations
+    are chosen by the netplan python bindings in the environment.
+
+    By calling the netplan API, allow netplan versions to change behavior
+    related to file permissions and treatment of sensitive configuration
+    under the API call to _write_yaml_file.
+
+    In future netplan releases, security-sensitive config may be written to
+    separate file or directory paths than world-readable configuration parts.
+    """
+    try:
+        from netplan.parser import Parser  # type: ignore
+        from netplan.state import State  # type: ignore
+    except ImportError:
+        LOG.debug(
+            "No netplan python module. Fallback to write %s",
+            CLOUDINIT_NETPLAN_FILE,
+        )
+        return False
+    try:
+        with SpooledTemporaryFile(mode="w") as f:
+            f.write(net_config_content)
+            f.flush()
+            f.seek(0, io.SEEK_SET)
+            parser = Parser()
+            parser.load_yaml(f)
+            state_output_file = State()
+            state_output_file.import_parser_results(parser)
+
+            # Write our desired basename 50-cloud-init.yaml, allow netplan to
+            # determine default root-dir /etc/netplan and/or specialized
+            # filenames or read permissions based on whether this config
+            # contains secrets.
+            state_output_file._write_yaml_file(
+                os.path.basename(CLOUDINIT_NETPLAN_FILE)
+            )
+    except Exception as e:
+        LOG.warning(
+            "Unable to render network config using netplan python module."
+            " Fallback to write %s. %s",
+            CLOUDINIT_NETPLAN_FILE,
+            e,
+        )
+        return False
+    LOG.debug("Rendered netplan config using netplan python API")
+    return True
+
+
+def has_netplan_config_changed(cfg_file: str, content: str) -> bool:
+    """Return True when new netplan config has changed vs previous."""
+    if not os.path.exists(cfg_file):
+        # This is our first write of netplan's cfg_file, representing change.
+        return True
+    # Check prev cfg vs current cfg. Ignore comments
+    prior_cfg = util.load_yaml(util.load_text_file(cfg_file))
+    return prior_cfg != util.load_yaml(content)
+
+
+def fallback_write_netplan_yaml(cfg_file: str, content: str):
+    """Write netplan config to cfg_file because python API was unavailable."""
+    mode = 0o600 if features.NETPLAN_CONFIG_ROOT_READ_ONLY else 0o644
+    if os.path.exists(cfg_file):
+        current_mode = util.get_permissions(cfg_file)
+        if current_mode & mode == current_mode:
+            # preserve mode if existing perms are more strict
+            mode = current_mode
+    util.write_file(cfg_file, content, mode=mode)
+
+
 class Renderer(renderer.Renderer):
     """Renders network information in a /etc/netplan/network.yaml format."""
 
@@ -242,17 +305,14 @@ class Renderer(renderer.Renderer):
     def __init__(self, config=None):
         if not config:
             config = {}
-        self.netplan_path = config.get(
-            "netplan_path", "etc/netplan/50-cloud-init.yaml"
-        )
+        self.netplan_path = config.get("netplan_path", CLOUDINIT_NETPLAN_FILE)
         self.netplan_header = config.get("netplan_header", None)
         self._postcmds = config.get("postcmds", False)
         self.clean_default = config.get("clean_default", True)
-        self._features = config.get("features", None)
+        self._features = config.get("features") or []
 
-    @property
-    def features(self):
-        if self._features is None:
+    def features(self) -> List[str]:
+        if not self._features:
             try:
                 info_blob, _err = subp.subp(self.NETPLAN_INFO, capture=True)
                 info = util.load_yaml(info_blob)
@@ -277,25 +337,36 @@ class Renderer(renderer.Renderer):
         fpnplan = os.path.join(subp.target_path(target), self.netplan_path)
 
         util.ensure_dir(os.path.dirname(fpnplan))
-        header = self.netplan_header if self.netplan_header else ""
 
         # render from state
         content = self._render_content(network_state)
 
+        # normalize header
+        header = self.netplan_header if self.netplan_header else ""
         if not header.endswith("\n"):
             header += "\n"
+        content = header + content
 
-        mode = 0o600 if features.NETPLAN_CONFIG_ROOT_READ_ONLY else 0o644
-        util.write_file(fpnplan, header + content, mode=mode)
+        netplan_config_changed = has_netplan_config_changed(fpnplan, content)
+        if not netplan_api_write_yaml_file(content):
+            fallback_write_netplan_yaml(fpnplan, content)
 
         if self.clean_default:
             _clean_default(target=target)
-        self._netplan_generate(run=self._postcmds)
+        self._netplan_generate(
+            run=self._postcmds, config_changed=netplan_config_changed
+        )
         self._net_setup_link(run=self._postcmds)
 
-    def _netplan_generate(self, run=False):
+    def _netplan_generate(self, run: bool, config_changed: bool):
         if not run:
-            LOG.debug("netplan generate postcmd disabled")
+            LOG.debug("netplan generate postcmds disabled")
+            return
+        if not config_changed:
+            LOG.debug(
+                "skipping call to `netplan generate`."
+                " reason: identical netplan config"
+            )
             return
         subp.subp(self.NETPLAN_GENERATE, capture=True)
 
@@ -307,13 +378,15 @@ class Renderer(renderer.Renderer):
         if not run:
             LOG.debug("netplan net_setup_link postcmd disabled")
             return
+        elif "net.ifnames=0" in util.get_cmdline():
+            LOG.debug("Predictable interface names disabled.")
+            return
         setup_lnk = ["udevadm", "test-builtin", "net_setup_link"]
 
         # It's possible we can race a udev rename and attempt to run
         # net_setup_link on a device that no longer exists. When this happens,
         # we don't know what the device was renamed to, so re-gather the
         # entire list of devices and try again.
-        last_exception = Exception
         for _ in range(5):
             try:
                 for iface in get_devicelist():
@@ -331,7 +404,6 @@ class Renderer(renderer.Renderer):
             ) from last_exception
 
     def _render_content(self, network_state: NetworkState) -> str:
-
         # if content already in netplan format, pass it back
         if network_state.version == 2:
             LOG.debug("V2 to V2 passthrough")
@@ -381,13 +453,10 @@ class Renderer(renderer.Renderer):
                 bond_config = {}
                 # extract bond params and drop the bond_ prefix as it's
                 # redundant in v2 yaml format
-                v2_bond_map = cast(dict, NET_CONFIG_TO_V2.get("bond"))
-                # Previous cast is needed to help mypy to know that the key is
-                # present in `NET_CONFIG_TO_V2`. This could probably be removed
-                # by using `Literal` when supported.
+                v2_bond_map = NET_CONFIG_TO_V2["bond"]
                 for match in ["bond_", "bond-"]:
                     bond_params = _get_params_dict_by_match(ifcfg, match)
-                    for (param, value) in bond_params.items():
+                    for param, value in bond_params.items():
                         newname = v2_bond_map.get(param.replace("_", "-"))
                         if newname is None:
                             continue
@@ -405,9 +474,18 @@ class Renderer(renderer.Renderer):
 
             elif if_type == "bridge":
                 # required_keys = ['name', 'bridge_ports']
+                #
+                # Rather than raise an exception on `sorted(None)`, log a
+                # warning and skip this interface when invalid configuration is
+                # received.
                 bridge_ports = ifcfg.get("bridge_ports")
-                # mypy wrong error. `copy(None)` is supported:
-                ports = sorted(copy.copy(bridge_ports))  # type: ignore
+                if bridge_ports is None:
+                    LOG.warning(
+                        "Invalid config. The key",
+                        f"'bridge_ports' is required in {config}.",
+                    )
+                    continue
+                ports = sorted(copy.copy(bridge_ports))
                 bridge: dict = {
                     "interfaces": ports,
                 }
@@ -419,11 +497,8 @@ class Renderer(renderer.Renderer):
 
                 # v2 yaml uses different names for the keys
                 # and at least one value format change
-                v2_bridge_map = cast(dict, NET_CONFIG_TO_V2.get("bridge"))
-                # Previous cast is needed to help mypy to know that the key is
-                # present in `NET_CONFIG_TO_V2`. This could probably be removed
-                # by using `Literal` when supported.
-                for (param, value) in params.items():
+                v2_bridge_map = NET_CONFIG_TO_V2["bridge"]
+                for param, value in params.items():
                     newname = v2_bridge_map.get(param)
                     if newname is None:
                         continue
@@ -495,23 +570,3 @@ def available(target=None):
         if not subp.which(p, search=search, target=target):
             return False
     return True
-
-
-def network_state_to_netplan(network_state, header=None):
-    # render the provided network state, return a string of equivalent eni
-    netplan_path = "etc/network/50-cloud-init.yaml"
-    renderer = Renderer(
-        {
-            "netplan_path": netplan_path,
-            "netplan_header": header,
-        }
-    )
-    if not header:
-        header = ""
-    if not header.endswith("\n"):
-        header += "\n"
-    contents = renderer._render_content(network_state)
-    return header + contents
-
-
-# vi: ts=4 expandtab

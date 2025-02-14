@@ -9,10 +9,13 @@ This test checks that cloud-init believes it has successfully applied the
 network configuration, and confirms that the bridge can be used to ping the
 default gateway.
 """
+
 import pytest
 
 from tests.integration_tests import random_mac_address
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.releases import CURRENT_RELEASE, FOCAL
+from tests.integration_tests.util import verify_clean_boot, verify_clean_log
 
 MAC_ADDRESS = random_mac_address()
 
@@ -44,10 +47,17 @@ version: 2
         "volatile.eth0.hwaddr": MAC_ADDRESS,
     }
 )
-@pytest.mark.lxd_vm
+@pytest.mark.skipif(
+    PLATFORM != "lxd_vm",
+    reason="Test requires custom networking provided by LXD",
+)
+@pytest.mark.skipif(
+    CURRENT_RELEASE < FOCAL, reason="Tested on Focal and above"
+)
 @pytest.mark.lxd_use_exec
-@pytest.mark.not_bionic
-@pytest.mark.ubuntu
+@pytest.mark.skip(
+    reason="Network online race. GH: #4350, GH: #4451, LP: #2036968"
+)
 class TestInterfaceListingWithOpenvSwitch:
     def test_ovs_member_interfaces_not_excluded(self, client):
         # We need to install openvswitch for our provided network configuration
@@ -64,6 +74,7 @@ class TestInterfaceListingWithOpenvSwitch:
 
         # Confirm that the network configuration was applied successfully
         verify_clean_log(cloudinit_output)
+        verify_clean_boot(client)
         # Confirm that the applied network config created the OVS bridge
         assert "ovs-br" in client.execute("ip addr")
 

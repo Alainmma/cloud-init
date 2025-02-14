@@ -1,18 +1,15 @@
-#!/usr/bin/env python3
-# vi: ts=4 expandtab
-#
 # Copyright (C) 2021-2022 VMware Inc.
 #
 # Author: Shreenidhi Shedi <yesshedi@gmail.com>
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 from collections import OrderedDict
 from typing import Optional
 
-from cloudinit import log as logging
 from cloudinit import subp, util
-from cloudinit.net import renderer
+from cloudinit.net import renderer, should_add_gateway_onlink_flag
 from cloudinit.net.network_state import NetworkState
 
 LOG = logging.getLogger(__name__)
@@ -71,7 +68,7 @@ class CfgParser:
                     contents += "[" + k + "]\n"
                     for e in sorted(v[n]):
                         contents += e + "\n"
-                        contents += "\n"
+                    contents += "\n"
             else:
                 contents += "[" + k + "]\n"
                 for e in sorted(v):
@@ -79,15 +76,6 @@ class CfgParser:
                 contents += "\n"
 
         return contents
-
-    def dump_data(self, target_fn):
-        if not target_fn:
-            LOG.warning("Target file not given")
-            return
-
-        contents = self.get_final_conf()
-        LOG.debug("Final content: %s", contents)
-        util.write_file(target_fn, contents)
 
 
 class Renderer(renderer.Renderer):
@@ -133,6 +121,9 @@ class Renderer(renderer.Renderer):
 
         if "mtu" in iface and iface["mtu"]:
             cfg.update_section(sec, "MTUBytes", iface["mtu"])
+
+        if "optional" in iface and iface["optional"]:
+            cfg.update_section(sec, "RequiredForOnline", "no")
 
     def parse_routes(self, rid, conf, cfg: CfgParser):
         """
@@ -181,6 +172,9 @@ class Renderer(renderer.Renderer):
                     self.parse_routes(f"r{rid}", i, cfg)
                     rid = rid + 1
             if "address" in e:
+                addr = e["address"]
+                if "prefix" in e:
+                    addr += "/" + str(e["prefix"])
                 subnet_cfg_map = {
                     "address": "Address",
                     "gateway": "Gateway",
@@ -189,24 +183,30 @@ class Renderer(renderer.Renderer):
                 }
                 for k, v in e.items():
                     if k == "address":
-                        if "prefix" in e:
-                            v += "/" + str(e["prefix"])
-                        cfg.update_section("Address", subnet_cfg_map[k], v)
+                        cfg.update_section("Address", subnet_cfg_map[k], addr)
                     elif k == "gateway":
                         # Use "a" as a dict key prefix for this route to
                         # isolate it from other sources of routes
                         cfg.update_route_section(
                             "Route", f"a{rid}", subnet_cfg_map[k], v
                         )
+                        if should_add_gateway_onlink_flag(v, addr):
+                            LOG.debug(
+                                "Gateway %s is not contained within subnet %s,"
+                                " adding GatewayOnLink flag",
+                                v,
+                                addr,
+                            )
+                            cfg.update_route_section(
+                                "Route", f"a{rid}", "GatewayOnLink", "yes"
+                            )
                         rid = rid + 1
                     elif k == "dns_nameservers" or k == "dns_search":
                         cfg.update_section(sec, subnet_cfg_map[k], " ".join(v))
 
         cfg.update_section(sec, "DHCP", dhcp)
 
-        if dhcp in ["ipv6", "yes"] and isinstance(
-            iface.get("accept-ra", ""), bool
-        ):
+        if isinstance(iface.get("accept-ra", ""), bool):
             cfg.update_section(sec, "IPv6AcceptRA", iface["accept-ra"])
 
         return dhcp
@@ -233,12 +233,6 @@ class Renderer(renderer.Renderer):
     def parse_dns(self, iface, cfg: CfgParser, ns: NetworkState):
         sec = "Network"
 
-        dns_cfg_map = {
-            "search": "Domains",
-            "nameservers": "DNS",
-            "addresses": "DNS",
-        }
-
         dns = iface.get("dns")
         if not dns and ns.version == 1:
             dns = {
@@ -248,9 +242,10 @@ class Renderer(renderer.Renderer):
         elif not dns and ns.version == 2:
             return
 
-        for k, v in dns_cfg_map.items():
-            if k in dns and dns[k]:
-                cfg.update_section(sec, v, " ".join(dns[k]))
+        if dns.get("search"):
+            cfg.update_section(sec, "Domains", " ".join(dns["search"]))
+        if dns.get("nameservers"):
+            cfg.update_section(sec, "DNS", " ".join(dns["nameservers"]))
 
     def parse_dhcp_overrides(self, cfg: CfgParser, device, dhcp, version):
         dhcp_config_maps = {
@@ -355,7 +350,7 @@ class Renderer(renderer.Renderer):
                                 f" and dhcp{version}-overrides.use-domains"
                                 f" configured. Use one"
                             )
-                            raise Exception(exception)
+                            raise RuntimeError(exception)
 
                         self.parse_dhcp_overrides(cfg, device, dhcp, version)
 
@@ -371,8 +366,3 @@ def available(target=None):
         if not subp.which(p, search=search, target=target):
             return False
     return True
-
-
-def network_state_to_networkd(ns: NetworkState):
-    renderer = Renderer({})
-    return renderer._render_content(ns)

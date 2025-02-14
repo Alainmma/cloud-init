@@ -1,8 +1,10 @@
 # Copyright (C) 2016 Canonical Ltd.
-# Copyright (C) 2016-2022 VMware Inc.
+# Copyright (C) 2006-2024 Broadcom. All Rights Reserved.
+# Broadcom Confidential. The term "Broadcom" refers to Broadcom Inc.
+# and/or its subsidiaries.
 #
 # Author: Sankar Tanguturi <stanguturi@vmware.com>
-#         Pengpeng Sun <pegnpengs@vmware.com>
+#         Pengpeng Sun <pengpeng.sun@broadcom.com>
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
@@ -11,14 +13,12 @@ import os
 import re
 import time
 
-from cloudinit import subp, util
+import yaml
+
+from cloudinit import performance, subp, util
 
 from .config import Config
-from .config_custom_script import (
-    CustomScriptNotFound,
-    PostCustomScript,
-    PreCustomScript,
-)
+from .config_custom_script import PostCustomScript, PreCustomScript
 from .config_file import ConfigFile
 from .config_nic import NicConfigurator
 from .config_passwd import PasswordConfigurator
@@ -89,7 +89,9 @@ def get_nics_to_enable(nicsfilepath):
     if not os.path.exists(nicsfilepath):
         return None
 
-    with open(nicsfilepath, "r") as fp:
+    with performance.Timed(f"Reading {nicsfilepath}"), open(
+        nicsfilepath, "r"
+    ) as fp:
         nics = fp.read(NICS_SIZE)
 
     return nics
@@ -106,7 +108,7 @@ def enable_nics(nics):
     enableNicsWaitCount = 5
     enableNicsWaitSeconds = 1
 
-    for attempt in range(0, enableNicsWaitRetries):
+    for attempt in range(enableNicsWaitRetries):
         logger.debug("Trying to connect interfaces, attempt %d", attempt)
         (out, _err) = set_customization_status(
             GuestCustStateEnum.GUESTCUST_STATE_RUNNING,
@@ -121,7 +123,7 @@ def enable_nics(nics):
             logger.warning("NICS connection status query is not supported")
             return
 
-        for count in range(0, enableNicsWaitCount):
+        for count in range(enableNicsWaitCount):
             (out, _err) = set_customization_status(
                 GuestCustStateEnum.GUESTCUST_STATE_RUNNING,
                 GuestCustEventEnum.GUESTCUST_EVENT_QUERY_NICS,
@@ -255,7 +257,7 @@ def get_data_from_imc_raw_data_cust_cfg(cust_cfg):
             )
             return (None, None, None)
         try:
-            md = util.load_file(md_path)
+            md = util.load_text_file(md_path)
         except Exception as e:
             set_cust_error_status(
                 "Error loading cloud-init meta data file",
@@ -264,6 +266,17 @@ def get_data_from_imc_raw_data_cust_cfg(cust_cfg):
                 cust_cfg,
             )
             return (None, None, None)
+
+        try:
+            logger.debug("Validating if meta data is valid or not")
+            md = yaml.safe_load(md)
+        except yaml.YAMLError as e:
+            set_cust_error_status(
+                "Error parsing the cloud-init meta data",
+                str(e),
+                GuestCustErrorEnum.GUESTCUST_ERROR_WRONG_META_FORMAT,
+                cust_cfg,
+            )
 
         ud_file = cust_cfg.user_data_name
         if ud_file:
@@ -277,7 +290,7 @@ def get_data_from_imc_raw_data_cust_cfg(cust_cfg):
                 )
                 return (None, None, None)
             try:
-                ud = util.load_file(ud_path).replace("\r", "")
+                ud = util.load_text_file(ud_path).replace("\r", "")
             except Exception as e:
                 set_cust_error_status(
                     "Error loading cloud-init userdata file",
@@ -314,23 +327,19 @@ def get_non_network_data_from_vmware_cust_cfg(cust_cfg):
 def get_network_data_from_vmware_cust_cfg(
     cust_cfg, use_system_devices=True, configure=False, osfamily=None
 ):
-    nicConfigurator = NicConfigurator(cust_cfg.nics, use_system_devices)
-    nics_cfg_list = nicConfigurator.generate(configure, osfamily)
-
-    return get_v1_network_config(
-        nics_cfg_list, cust_cfg.name_servers, cust_cfg.dns_suffixes
+    nicConfigurator = NicConfigurator(
+        cust_cfg.nics,
+        cust_cfg.name_servers,
+        cust_cfg.dns_suffixes,
+        use_system_devices,
     )
+    ethernets_dict = nicConfigurator.generate(configure, osfamily)
+
+    return gen_v2_network_config(ethernets_dict)
 
 
-def get_v1_network_config(nics_cfg_list=None, nameservers=None, search=None):
-    config_list = nics_cfg_list
-
-    if nameservers or search:
-        config_list.append(
-            {"type": "nameserver", "address": nameservers, "search": search}
-        )
-
-    return {"version": 1, "config": config_list}
+def gen_v2_network_config(ethernets_dict):
+    return {"version": 2, "ethernets": ethernets_dict}
 
 
 def connect_nics(cust_cfg_dir):
@@ -358,12 +367,10 @@ def get_cust_cfg_file(ds_cfg):
     # that required metadata and userdata files are now
     # present.
     max_wait = get_max_wait_from_cfg(ds_cfg)
-    cust_cfg_file_path = util.log_time(
-        logfunc=logger.debug,
-        msg="Waiting for VMware customization configuration file",
-        func=wait_for_cust_cfg_file,
-        args=("cust.cfg", max_wait),
-    )
+    with performance.Timed(
+        "Waiting for VMware customization configuration file"
+    ):
+        cust_cfg_file_path = wait_for_cust_cfg_file("cust.cfg", max_wait)
     if cust_cfg_file_path:
         logger.debug(
             "Found VMware customization configuration file at %s",
@@ -512,7 +519,7 @@ def do_pre_custom_script(cust_cfg, custom_script, cust_cfg_dir):
     try:
         precust = PreCustomScript(custom_script, cust_cfg_dir)
         precust.execute()
-    except CustomScriptNotFound as e:
+    except Exception as e:
         set_cust_error_status(
             "Error executing pre-customization script",
             str(e),
@@ -527,7 +534,7 @@ def do_post_custom_script(cust_cfg, custom_script, cust_cfg_dir, ccScriptsDir):
     try:
         postcust = PostCustomScript(custom_script, cust_cfg_dir, ccScriptsDir)
         postcust.execute()
-    except CustomScriptNotFound as e:
+    except Exception as e:
         set_cust_error_status(
             "Error executing post-customization script",
             str(e),
@@ -607,6 +614,7 @@ def is_cust_plugin_available():
         "/usr/lib64/open-vm-tools",
         "/usr/lib/x86_64-linux-gnu/open-vm-tools",
         "/usr/lib/aarch64-linux-gnu/open-vm-tools",
+        "/usr/lib/i386-linux-gnu/open-vm-tools",
     )
     cust_plugin = "libdeployPkgPlugin.so"
     for path in search_paths:
@@ -637,6 +645,3 @@ def set_cust_error_status(prefix, error, event, cust_cfg):
     util.logexc(logger, "%s: %s", prefix, error)
     set_customization_status(GuestCustStateEnum.GUESTCUST_STATE_RUNNING, event)
     set_gc_status(cust_cfg, prefix)
-
-
-# vi: ts=4 expandtab

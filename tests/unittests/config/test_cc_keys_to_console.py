@@ -20,7 +20,7 @@ class TestHandle:
     should be expanded to cover the full functionality.
     """
 
-    @mock.patch("cloudinit.config.cc_keys_to_console.util.multi_log")
+    @mock.patch("cloudinit.config.cc_keys_to_console.log_util.multi_log")
     @mock.patch("cloudinit.config.cc_keys_to_console.os.path.exists")
     @mock.patch("cloudinit.config.cc_keys_to_console.subp.subp")
     @pytest.mark.parametrize(
@@ -42,7 +42,7 @@ class TestHandle:
         m_path_exists.return_value = True
         m_subp.return_value = ("", "")
 
-        cc_keys_to_console.handle("name", cfg, mock.Mock(), mock.Mock(), ())
+        cc_keys_to_console.handle("name", cfg, mock.Mock(), ())
 
         assert subp_called == (m_subp.call_count == 1)
 
@@ -114,6 +114,3 @@ class TestKeysToConsoleSchema:
         schema = get_schema()
         with pytest.raises(SchemaValidationError, match=error_msg):
             validate_cloudconfig_schema(config, schema, strict=True)
-
-
-# vi: ts=4 expandtab

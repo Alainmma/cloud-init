@@ -3,12 +3,15 @@
 Test that the power state config options work as expected.
 """
 
+import re
 import time
 
 import pytest
 
 from tests.integration_tests.clouds import IntegrationCloud
 from tests.integration_tests.instances import IntegrationInstance
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.releases import IS_UBUNTU
 from tests.integration_tests.util import verify_ordered_items_in_text
 
 USER_DATA = """\
@@ -50,16 +53,18 @@ def _can_connect(instance):
 # This test is marked unstable because even though it should be able to
 # run anywhere, I can only get it to run in an lxd container, and even then
 # occasionally some timing issues will crop up.
-@pytest.mark.unstable
-@pytest.mark.ubuntu
-@pytest.mark.lxd_container
+@pytest.mark.skipif(not IS_UBUNTU, reason="Only ever tested on Ubuntu")
+@pytest.mark.skipif(
+    PLATFORM != "lxd_container",
+    reason="Test is unstable but most stable on lxd containers",
+)
 class TestPowerChange:
     @pytest.mark.parametrize(
         "mode,delay,timeout,expected",
         [
             ("poweroff", "now", "10", "will execute: shutdown -P now msg"),
             ("reboot", "now", "0", "will execute: shutdown -r now msg"),
-            ("halt", "+1", "0", "will execute: shutdown -H +1 msg"),
+            ("halt", "+1", "0", re.escape("will execute: shutdown -H +1 msg")),
         ],
     )
     def test_poweroff(
@@ -69,7 +74,7 @@ class TestPowerChange:
             user_data=USER_DATA.format(
                 delay=delay, mode=mode, timeout=timeout, condition="true"
             ),
-            launch_kwargs={"wait": False},
+            wait=False,
         ) as instance:
             if mode == "reboot":
                 _detect_reboot(instance)
@@ -79,10 +84,10 @@ class TestPowerChange:
             log = instance.read_from_file("/var/log/cloud-init.log")
             assert _can_connect(instance)
         lines_to_check = [
-            "Running module power-state-change",
+            "Running module power_state_change",
             expected,
             "running 'init-local'",
-            "config-power-state-change already ran",
+            "config-power_state_change already ran",
         ]
         verify_ordered_items_in_text(lines_to_check, log)
 

@@ -1,65 +1,30 @@
 """ansible enables running on first boot either ansible-pull"""
+
 import abc
+import logging
 import os
 import re
 import sys
+import sysconfig
 from copy import deepcopy
-from logging import Logger, getLogger
-from textwrap import dedent
 from typing import Optional
 
+from cloudinit import lifecycle, signal_handler, subp
 from cloudinit.cloud import Cloud
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.distros import ALL_DISTROS, Distro
 from cloudinit.settings import PER_INSTANCE
-from cloudinit.subp import subp, which
-from cloudinit.util import Version, get_cfg_by_path
+from cloudinit.util import get_cfg_by_path
 
 meta: MetaSchema = {
     "id": "cc_ansible",
-    "name": "Ansible",
-    "title": "Configure ansible for instance",
     "frequency": PER_INSTANCE,
     "distros": [ALL_DISTROS],
     "activate_by_schema_keys": ["ansible"],
-    "description": dedent(
-        """\
-        This module provides ``ansible`` integration for
-        augmenting cloud-init's configuration of the local
-        node.
-
-
-        This module installs ansible during boot and
-        then uses ``ansible-pull`` to run the playbook
-        repository at the remote URL.
-        """
-    ),
-    "examples": [
-        dedent(
-            """\
-            ansible:
-              install_method: distro
-              pull:
-                url: "https://github.com/holmanb/vmboot.git"
-                playbook_name: ubuntu.yml
-            """
-        ),
-        dedent(
-            """\
-            ansible:
-              package_name: ansible-core
-              install_method: pip
-              pull:
-                url: "https://github.com/holmanb/vmboot.git"
-                playbook_name: ubuntu.yml
-            """
-        ),
-    ],
 }
 
-__doc__ = get_meta_doc(meta)
-LOG = getLogger(__name__)
+LOG = logging.getLogger(__name__)
 CFG_OVERRIDE = "ansible_config"
 
 
@@ -68,20 +33,20 @@ class AnsiblePull(abc.ABC):
         self.cmd_pull = ["ansible-pull"]
         self.cmd_version = ["ansible-pull", "--version"]
         self.distro = distro
-        self.env = os.environ
+        self.env = {}
         self.run_user: Optional[str] = None
 
         # some ansible modules directly reference os.environ["HOME"]
         # and cloud-init might not have that set, default: /root
-        self.env["HOME"] = self.env.get("HOME", "/root")
+        self.env["HOME"] = os.environ.get("HOME", "/root")
 
-    def get_version(self) -> Optional[Version]:
+    def get_version(self) -> Optional[lifecycle.Version]:
         stdout, _ = self.do_as(self.cmd_version)
         first_line = stdout.splitlines().pop(0)
         matches = re.search(r"([\d\.]+)", first_line)
         if matches:
             version = matches.group(0)
-            return Version.from_str(version)
+            return lifecycle.Version.from_str(version)
         return None
 
     def pull(self, *args) -> str:
@@ -98,7 +63,8 @@ class AnsiblePull(abc.ABC):
         return self.distro.do_as(command, self.run_user, **kwargs)
 
     def subp(self, command, **kwargs):
-        return subp(command, env=self.env, **kwargs)
+        with signal_handler.suspend_crash():
+            return subp.subp(command, update_env=self.env, **kwargs)
 
     @abc.abstractmethod
     def is_installed(self):
@@ -134,8 +100,19 @@ class AnsiblePullPip(AnsiblePull):
             try:
                 import pip  # noqa: F401
             except ImportError:
-                self.distro.install_packages(self.distro.pip_package_name)
-            cmd = [sys.executable, "-m", "pip", "install"]
+                self.distro.install_packages([self.distro.pip_package_name])
+            cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+            ]
+            if os.path.exists(
+                os.path.join(
+                    sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED"
+                )
+            ):
+                cmd.append("--break-system-packages")
             if self.run_user:
                 cmd.append("--user")
             self.do_as([*cmd, "--upgrade", "pip"])
@@ -147,17 +124,19 @@ class AnsiblePullPip(AnsiblePull):
 
 
 class AnsiblePullDistro(AnsiblePull):
+    def __init__(self, distro: Distro, user: Optional[str]):
+        super().__init__(distro)
+        self.run_user = user
+
     def install(self, pkg_name: str):
         if not self.is_installed():
-            self.distro.install_packages(pkg_name)
+            self.distro.install_packages([pkg_name])
 
     def is_installed(self) -> bool:
-        return bool(which("ansible"))
+        return bool(subp.which("ansible"))
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
 
     ansible_cfg: dict = cfg.get("ansible", {})
     ansible_user = ansible_cfg.get("run_user")
@@ -176,7 +155,7 @@ def handle(
         if install_method == "pip":
             ansible = AnsiblePullPip(distro, ansible_user)
         else:
-            ansible = AnsiblePullDistro(distro)
+            ansible = AnsiblePullDistro(distro, ansible_user)
         ansible.install(package_name)
         ansible.check_deps()
         ansible_config = ansible_cfg.get("ansible_config", "")
@@ -237,7 +216,7 @@ def run_ansible_pull(pull: AnsiblePull, cfg: dict):
     v = pull.get_version()
     if not v:
         LOG.warning("Cannot parse ansible version")
-    elif v < Version(2, 7, 0):
+    elif v < lifecycle.Version(2, 7, 0):
         # diff was added in commit edaa0b52450ade9b86b5f63097ce18ebb147f46f
         if cfg.get("diff"):
             raise ValueError(

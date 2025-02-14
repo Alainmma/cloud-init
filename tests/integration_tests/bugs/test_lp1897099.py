@@ -1,4 +1,4 @@
-""" Integration test for LP #187099
+"""Integration test for LP #187099
 
 Ensure that if fallocate fails during mkswap that we fall back to using dd
 
@@ -6,6 +6,8 @@ https://bugs.launchpad.net/cloud-init/+bug/1897099
 """
 
 import pytest
+
+from tests.integration_tests.integration_settings import PLATFORM
 
 USER_DATA = """\
 #cloud-config
@@ -19,7 +21,9 @@ swap:
 
 
 @pytest.mark.user_data(USER_DATA)
-@pytest.mark.no_container("Containers cannot configure swap")
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot configure swap"
+)
 def test_fallocate_fallback(client):
     log = client.read_from_file("/var/log/cloud-init.log")
     assert "/swap.img" in client.execute("cat /proc/swaps")

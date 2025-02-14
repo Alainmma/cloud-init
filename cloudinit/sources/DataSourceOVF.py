@@ -8,19 +8,25 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+"""Cloud-Init DataSource for OVF
+
+This module provides a cloud-init datasource for OVF data.
+"""
+
 import base64
+import logging
 import os
 import re
-from xml.dom import minidom
+from xml.dom import minidom  # nosec B408
 
-from cloudinit import log as logging
-from cloudinit import safeyaml, sources, subp, util
+import yaml
+
+from cloudinit import sources, subp, util
 
 LOG = logging.getLogger(__name__)
 
 
 class DataSourceOVF(sources.DataSource):
-
     dsname = "OVF"
 
     def __init__(self, sys_cfg, distro, paths):
@@ -72,7 +78,7 @@ class DataSourceOVF(sources.DataSource):
                 found.append(name)
 
         # There was no OVF transports found
-        if len(found) == 0:
+        if not found:
             return False
 
         if "seedfrom" in md and md["seedfrom"]:
@@ -86,7 +92,7 @@ class DataSourceOVF(sources.DataSource):
                 LOG.debug("Seed from %s not supported by %s", seedfrom, self)
                 return False
 
-            (md_seed, ud, vd) = util.read_seeded(seedfrom, timeout=None)
+            (md_seed, ud, vd, _) = util.read_seeded(seedfrom, timeout=None)
             LOG.debug("Using seeded cache data from %s", seedfrom)
 
             md = util.mergemanydict([md, md_seed])
@@ -142,7 +148,7 @@ def read_ovf_environment(contents, read_network=False):
     cfg_props = ["password"]
     md_props = ["seedfrom", "local-hostname", "public-keys", "instance-id"]
     network_props = ["network-config"]
-    for (prop, val) in props.items():
+    for prop, val in props.items():
         if prop == "hostname":
             prop = "local-hostname"
         if prop in md_props:
@@ -171,7 +177,7 @@ def get_ovf_env(dirname):
         full_fn = os.path.join(dirname, fname)
         if os.path.isfile(full_fn):
             try:
-                contents = util.load_file(full_fn)
+                contents = util.load_text_file(full_fn)
                 return (fname, contents)
             except Exception:
                 util.logexc(LOG, "Failed loading ovf file %s", full_fn)
@@ -220,10 +226,9 @@ def maybe_cdrom_device(devname):
 # Transport functions are called with no arguments and return
 # either None (indicating not present) or string content of an ovf-env.xml
 def transport_iso9660(require_iso=True):
-
     # Go through mounts to see if it was already mounted
     mounts = util.mounts()
-    for (dev, info) in mounts.items():
+    for dev, info in mounts.items():
         fstype = info["fstype"]
         if fstype != "iso9660" and require_iso:
             continue
@@ -258,22 +263,87 @@ def transport_iso9660(require_iso=True):
     return None
 
 
+def exec_vmware_rpctool(rpctool, arg):
+    cmd = [rpctool, arg]
+    (stdout, stderr) = subp.subp(cmd)
+    return (cmd, stdout, stderr)
+
+
+def exec_vmtoolsd(rpctool, arg):
+    cmd = [rpctool, "--cmd", arg]
+    (stdout, stderr) = subp.subp(cmd)
+    return (cmd, stdout, stderr)
+
+
 def transport_vmware_guestinfo():
-    rpctool = "vmware-rpctool"
-    not_found = None
-    if not subp.which(rpctool):
-        return not_found
-    cmd = [rpctool, "info-get guestinfo.ovfEnv"]
+    rpctool, rpctool_fn = None, None
+    vmtoolsd = subp.which("vmtoolsd")
+    vmware_rpctool = subp.which("vmware-rpctool")
+
+    # Default to using vmware-rpctool if it is available.
+    if vmware_rpctool:
+        rpctool, rpctool_fn = vmware_rpctool, exec_vmware_rpctool
+        LOG.debug("discovered vmware-rpctool: %s", vmware_rpctool)
+
+    if vmtoolsd:
+        # Default to using vmtoolsd if it is available and vmware-rpctool is
+        # not.
+        if not vmware_rpctool:
+            rpctool, rpctool_fn = vmtoolsd, exec_vmtoolsd
+        LOG.debug("discovered vmtoolsd: %s", vmtoolsd)
+
+    # If neither vmware-rpctool nor vmtoolsd are available, then nothing can
+    # be done.
+    if not rpctool:
+        LOG.debug("no rpctool discovered")
+        return None
+
+    def query_guestinfo(rpctool, rpctool_fn):
+        LOG.info("query guestinfo.ovfEnv with %s", rpctool)
+        try:
+            cmd, stdout, _ = rpctool_fn(rpctool, "info-get guestinfo.ovfEnv")
+            if stdout:
+                return stdout
+            LOG.debug("cmd %s exited 0 with empty stdout", cmd)
+            return None
+        except subp.ProcessExecutionError as error:
+            if error.exit_code != 1:
+                LOG.warning("%s exited with code %d", rpctool, error.exit_code)
+            raise error
+
     try:
-        out, _err = subp.subp(cmd)
-        if out:
-            return out
-        LOG.debug("cmd %s exited 0 with empty stdout: %s", cmd, out)
-    except subp.ProcessExecutionError as e:
-        if e.exit_code != 1:
-            LOG.warning("%s exited with code %d", rpctool, e.exit_code)
-            LOG.debug(e)
-    return not_found
+        # The first attempt to query guestinfo could occur via either
+        # vmware-rpctool *or* vmtoolsd.
+        return query_guestinfo(rpctool, rpctool_fn)
+    except subp.ProcessExecutionError as error:
+        # The second attempt to query guestinfo can only occur with
+        # vmtoolsd.
+
+        # If the first attempt at getting the data was with vmtoolsd, then
+        # no second attempt is made.
+        if vmtoolsd and rpctool == vmtoolsd:
+            # The fallback failed and exit code is not 1, log the error.
+            if error.exit_code != 1:
+                util.logexc(
+                    LOG, "vmtoolsd failed to get guestinfo.ovfEnv: %s", error
+                )
+            return None
+
+        if not vmtoolsd:
+            LOG.info("vmtoolsd fallback option not present")
+            return None
+
+        try:
+            LOG.info("fallback to vmtoolsd")
+            return query_guestinfo(vmtoolsd, exec_vmtoolsd)
+        except subp.ProcessExecutionError as error:
+            # The fallback failed and exit code is not 1, log the error.
+            if error.exit_code != 1:
+                util.logexc(
+                    LOG, "vmtoolsd failed to get guestinfo.ovfEnv: %s", error
+                )
+
+    return None
 
 
 def find_child(node, filter_func):
@@ -287,8 +357,7 @@ def find_child(node, filter_func):
 
 
 def get_properties(contents):
-
-    dom = minidom.parseString(contents)
+    dom = minidom.parseString(contents)  # nosec B318
     if dom.documentElement.localName != "Environment":
         raise XmlError("No Environment Node")
 
@@ -303,7 +372,7 @@ def get_properties(contents):
         dom.documentElement, lambda n: n.localName == "PropertySection"
     )
 
-    if len(propSections) == 0:
+    if not propSections:
         raise XmlError("No 'PropertySection's")
 
     props = {}
@@ -343,7 +412,4 @@ def safeload_yaml_or_dict(data):
     """
     if not data:
         return {}
-    return safeyaml.load(data)
-
-
-# vi: ts=4 expandtab
+    return yaml.safe_load(data)

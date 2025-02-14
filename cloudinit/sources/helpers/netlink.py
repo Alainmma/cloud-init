@@ -2,28 +2,24 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 import os
 import select
 import socket
 import struct
 from collections import namedtuple
 
-from cloudinit import log as logging
 from cloudinit import util
 
 LOG = logging.getLogger(__name__)
 
 # http://man7.org/linux/man-pages/man7/netlink.7.html
 RTMGRP_LINK = 1
-NLMSG_NOOP = 1
-NLMSG_ERROR = 2
-NLMSG_DONE = 3
 RTM_NEWLINK = 16
 RTM_DELLINK = 17
 RTM_GETLINK = 18
 RTM_SETLINK = 19
 MAX_SIZE = 65535
-RTA_DATA_OFFSET = 32
 MSG_TYPE_OFFSET = 16
 SELECT_TIMEOUT = 60
 
@@ -137,7 +133,7 @@ def unpack_rta_attr(data, offset):
     :raises: AssertionError if data is None or offset is not integer.
     """
     assert data is not None, "data is none"
-    assert type(offset) == int, "offset is not integer"
+    assert isinstance(offset, int), "offset is not integer"
     assert (
         offset >= RTATTR_START_OFFSET
     ), "rta offset is less than expected length"
@@ -341,6 +337,3 @@ def read_netlink_messages(
             ):
                 return
         data = data[offset:]
-
-
-# vi: ts=4 expandtab

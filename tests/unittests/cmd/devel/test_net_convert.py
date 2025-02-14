@@ -3,8 +3,8 @@
 import itertools
 
 import pytest
+import yaml
 
-from cloudinit import safeyaml as yaml
 from cloudinit.cmd.devel import net_convert
 from cloudinit.distros.debian import NETWORK_FILE_HEADER
 from tests.unittests.helpers import mock
@@ -58,11 +58,10 @@ DHCP=ipv4
 """
 
 SAMPLE_SYSCONFIG_CONTENT = """\
-# Created by cloud-init on instance boot automatically, do not edit.
+# Created by cloud-init automatically, do not edit.
 #
 BOOTPROTO=dhcp
 DEVICE=eth0
-NM_CONTROLLED=no
 ONBOOT=yes
 TYPE=Ethernet
 USERCTL=no
@@ -74,6 +73,7 @@ SAMPLE_NETWORK_MANAGER_CONTENT = """\
 [connection]
 id=cloud-init eth0
 uuid=1dd9a779-d327-56e1-8454-c65e2556c12c
+autoconnect-priority=120
 type=ethernet
 interface-name=eth0
 
@@ -87,6 +87,18 @@ method=auto
 may-fail=false
 
 """
+
+
+@pytest.fixture
+def mock_setup_logging():
+    """Mock setup_basic_logging to avoid changing log level.
+
+    net_convert.handle_args() can call setup_basic_logging() with a
+    WARNING level, which would be a side-effect for future tests.
+    It's behavior isn't checked in these tests, so mock it out.
+    """
+    with mock.patch(f"{M_PATH}loggers.setup_basic_logging"):
+        yield
 
 
 class TestNetConvert:
@@ -154,7 +166,13 @@ class TestNetConvert:
         ),
     )
     def test_convert_output_kind_artifacts(
-        self, output_kind, outfile_content, debug, capsys, tmpdir
+        self,
+        output_kind,
+        outfile_content,
+        debug,
+        capsys,
+        tmpdir,
+        mock_setup_logging,
     ):
         """Assert proper output-kind artifacts are written."""
         network_data = tmpdir.join("network_data")
@@ -185,7 +203,9 @@ class TestNetConvert:
                 ] == chown.call_args_list
 
     @pytest.mark.parametrize("debug", (False, True))
-    def test_convert_netplan_passthrough(self, debug, tmpdir):
+    def test_convert_netplan_passthrough(
+        self, debug, tmpdir, mock_setup_logging
+    ):
         """Assert that if the network config's version is 2 and the renderer is
         Netplan, then the config is passed through as-is.
         """
@@ -223,7 +243,4 @@ class TestNetConvert:
         with mock.patch("cloudinit.util.chownbyname"):
             net_convert.handle_args("somename", args)
         outfile = tmpdir.join("etc/netplan/50-cloud-init.yaml")
-        assert yaml.load(content) == yaml.load(outfile.read())
-
-
-# vi: ts=4 expandtab
+        assert yaml.safe_load(content) == yaml.safe_load(outfile.read())

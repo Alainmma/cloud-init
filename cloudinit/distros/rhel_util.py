@@ -8,7 +8,8 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-from cloudinit import log as logging
+import logging
+
 from cloudinit import util
 from cloudinit.distros.parsers.sys_conf import SysConf
 
@@ -21,11 +22,11 @@ def update_sysconfig_file(fn, adjustments, allow_empty=False):
         return
     (exists, contents) = read_sysconfig_file(fn)
     updated_am = 0
-    for (k, v) in adjustments.items():
+    for k, v in adjustments.items():
         if v is None:
             continue
         v = str(v)
-        if len(v) == 0 and not allow_empty:
+        if (not v) and (not allow_empty):
             continue
         contents[k] = v
         updated_am += 1
@@ -42,11 +43,8 @@ def update_sysconfig_file(fn, adjustments, allow_empty=False):
 def read_sysconfig_file(fn):
     exists = False
     try:
-        contents = util.load_file(fn).splitlines()
+        contents = util.load_text_file(fn).splitlines()
         exists = True
     except IOError:
         contents = []
     return (exists, SysConf(contents))
-
-
-# vi: ts=4 expandtab

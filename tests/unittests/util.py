@@ -1,13 +1,33 @@
 # This file is part of cloud-init. See LICENSE file for license information.
+from typing import Optional, Type
 from unittest import mock
 
 from cloudinit import cloud, distros, helpers
+from cloudinit.config import Config
+from cloudinit.net.dhcp import IscDhclient
 from cloudinit.sources import DataSource, DataSourceHostname
 from cloudinit.sources.DataSourceNone import DataSourceNone
 
 
+class DataSourceTesting(DataSourceNone):
+    def get_hostname(self, fqdn=False, resolve_ip=False, metadata_only=False):
+        return DataSourceHostname("hostname", False)
+
+    def persist_instance_data(self):
+        return True
+
+    @property
+    def cloud_name(self):
+        return "testing"
+
+
 def get_cloud(
-    distro=None, paths=None, sys_cfg=None, metadata=None, mocked_distro=False
+    distro: Optional[str] = None,
+    paths: Optional[helpers.Paths] = None,
+    sys_cfg: Optional[Config] = None,
+    metadata=None,
+    mocked_distro=False,
+    ds: Type[DataSource] = DataSourceTesting,
 ):
     """Obtain a "cloud" that can be used for testing.
 
@@ -20,16 +40,25 @@ def get_cloud(
     """
     paths = paths or helpers.Paths({})
     sys_cfg = sys_cfg or {}
-    cls = distros.fetch(distro) if distro else MockDistro
-    mydist = cls(distro, sys_cfg, paths)
+    if distro:
+        distro_cls: Type[distros.Distro] = distros.fetch(distro)
+    else:
+        distro = "testingdistro"
+        distro_cls = MockDistro
+    # *BSD calls platform.system to determine osfamilies
+    osfamily = distro.lower() if distro else "ubuntu"
+    with mock.patch("platform.system", return_value=osfamily):
+        mydist = distro_cls(distro, sys_cfg, paths)
     if mocked_distro:
         mydist = mock.MagicMock(wraps=mydist)
-    myds = DataSourceTesting(sys_cfg, mydist, paths)
+    myds = ds(sys_cfg, mydist, paths)
     if metadata:
         myds.metadata.update(metadata)
     if paths:
         paths.datasource = myds
-    return cloud.Cloud(myds, paths, sys_cfg, mydist, None)
+    return cloud.Cloud(
+        myds, paths, sys_cfg, mydist, runners=helpers.Runners(paths)
+    )
 
 
 def abstract_to_concrete(abclass):
@@ -42,30 +71,24 @@ def abstract_to_concrete(abclass):
     return type("DummyConcrete" + abclass.__name__, (concreteCls,), {})
 
 
-class DataSourceTesting(DataSourceNone):
-    def get_hostname(self, fqdn=False, resolve_ip=False, metadata_only=False):
-        return DataSourceHostname("hostname", False)
-
-    def persist_instance_data(self):
-        return True
-
-    @property
-    def fallback_interface(self):
-        return None
-
-    @property
-    def cloud_name(self):
-        return "testing"
-
-
 class MockDistro(distros.Distro):
     # MockDistro is here to test base Distro class implementations
     def __init__(self, name="testingdistro", cfg=None, paths=None):
+        self._client = None
         if not cfg:
             cfg = {}
         if not paths:
             paths = {}
         super(MockDistro, self).__init__(name, cfg, paths)
+
+    @property
+    def dhcp_client(self):
+        if not self._client:
+            with mock.patch(
+                "cloudinit.net.dhcp.subp.which", return_value=True
+            ):
+                self._client = IscDhclient()
+        return self._client
 
     def install_packages(self, pkglist):
         pass
@@ -73,17 +96,23 @@ class MockDistro(distros.Distro):
     def set_hostname(self, hostname, fqdn=None):
         pass
 
-    def uses_systemd(self):
+    @staticmethod
+    def uses_systemd():
         return True
+
+    @staticmethod
+    def get_proc_ppid(_):
+        return 1
+
+    @staticmethod
+    def get_proc_pgid(_):
+        return 99999
 
     def get_primary_arch(self):
         return "i386"
 
     def get_package_mirror_info(self, arch=None, data_source=None):
         pass
-
-    def apply_network(self, settings, bring_up=True):
-        return False
 
     def generate_fallback_config(self):
         return {}
@@ -145,7 +174,7 @@ class MockDistro(distros.Distro):
     def package_command(self, command, args=None, pkgs=None):
         pass
 
-    def update_package_sources(self):
+    def update_package_sources(self, *, force=False):
         return (True, "yay")
 
     def do_as(self, command, args=None, **kwargs):

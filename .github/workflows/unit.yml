@@ -1,6 +1,9 @@
 name: Unit Tests
 on:
   pull_request:
+  push:
+    branches:
+      - main
 concurrency:
   group: 'ci-${{ github.workflow }}-${{ github.ref }}'
   cancel-in-progress: true
@@ -11,24 +14,34 @@ jobs:
   unittests:
     strategy:
       matrix:
-        python-version: [ "3.6", "3.7", "3.8", "3.9", "3.10", "3.11" ]
-    name: Python ${{matrix.python-version}} unittest
-    runs-on: ubuntu-20.04
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+        toxenv: [py3]
+        slug: [""]
+        experimental: [false]
+        check-latest: [false]
+        continue-on-error: [false]
+        include:
+          - python-version: "3.8"
+            toxenv: lowest-supported
+            slug: (lowest-supported)
+            continue-on-error: false
+            check-latest: false
+            experimental: false
+    name: Python ${{matrix.python-version}} ${{ matrix.slug }}
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
     steps:
-      - name: "Checkout #1"
-        uses: actions/checkout@v3.0.0
-      - name: "Checkout #2 (for tools/read-version)"
-        run: |
-          git fetch --unshallow
-          git remote add upstream https://git.launchpad.net/cloud-init
+      - name: "Checkout"
+        uses: actions/checkout@v4
+        with:
+          # Fetch all tags for tools/read-version
+          fetch-depth: 0
       - name: Install Python ${{matrix.python-version}}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{matrix.python-version}}
+          check-latest: ${{matrix.check-latest}}
       - name: Install tox
         run: pip install tox
       - name: Run unittest
-        env:
-          TOXENV: py3
-          PYTEST_ADDOPTS: -v
-        run: tox
+        run: tox -e ${{ matrix.toxenv }} -- --color=yes

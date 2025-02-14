@@ -16,13 +16,15 @@ KEEP_IMAGE = False
 RUN_UNSTABLE = False
 
 # One of:
-#  lxd_container
-#  lxd_vm
 #  azure
 #  ec2
 #  gce
+#  ibm
+#  lxd_container
+#  lxd_vm
 #  oci
 #  openstack
+#  qemu
 PLATFORM = "lxd_container"
 
 # The cloud-specific instance type to run. E.g., a1.medium on AWS
@@ -32,10 +34,21 @@ INSTANCE_TYPE: Optional[str] = None
 # Determines the base image to use or generate new images from.
 #
 # This can be the name of an Ubuntu release, or in the format
-# <image_id>[::<os>[::<release>]].  If given, os and release should describe
-# the image specified by image_id.  (Ubuntu releases are converted to this
-# format internally; in this case, to "focal::ubuntu::focal".)
+# <image_id>[::<os>::<release>::<version>].  If given, os and release should
+# describe the image specified by image_id.  (Ubuntu releases are converted
+# to this format internally; in this case, to "None::ubuntu::focal::20.04".)
 OS_IMAGE = "focal"
+
+
+# Determines unique image type or flavor to exercise if the cloud supports
+# image-type lookup for daily_image and released_images.
+#
+# One of the following pycloudlib.cloud.ImageType values:
+# - generic
+# - minimal
+# - Pro
+# - Pro FIPS
+OS_IMAGE_TYPE = "generic"
 
 # Populate if you want to use a pre-launched instance instead of
 # creating a new one. The exact contents will be platform dependent
@@ -44,6 +57,7 @@ EXISTING_INSTANCE_ID: Optional[str] = None
 ##################################################################
 # IMAGE GENERATION SETTINGS
 ##################################################################
+
 
 # Depending on where we are in the development / test / SRU cycle, we'll want
 # different methods of getting the source code to our SUT. Because of
@@ -67,7 +81,11 @@ EXISTING_INSTANCE_ID: Optional[str] = None
 #   Install from a PPA. It MUST start with 'ppa:'
 # <file path>
 #   A path to a valid package to be uploaded and installed
-CLOUD_INIT_SOURCE = "NONE"
+CLOUD_INIT_SOURCE = "IN_PLACE"
+
+# cloud-init metapackage to install
+# Examples: cloud-init, cloud-init-base, cloud-init-smart-os
+CLOUD_INIT_PKG = "cloud-init"
 
 # Before an instance is torn down, we run `cloud-init collect-logs`
 # and transfer them locally. These settings specify when to collect these
@@ -78,6 +96,19 @@ CLOUD_INIT_SOURCE = "NONE"
 #   'NEVER'
 COLLECT_LOGS = "ON_ERROR"
 LOCAL_LOG_PATH = "/tmp/cloud_init_test_logs"
+
+# We default our coverage to False because it involves modifying the
+# cloud-init systemd services, which is too intrusive of a change to
+# enable by default. If changed to true, the test directory corresponding
+# to the test run under LOCAL_LOG_PATH defined above will contain an
+# `html` directory with the coverage report.
+INCLUDE_COVERAGE = False
+
+# We default our profile to False because it involves modifying the
+# cloud-init systemd services, which is too intrusive of a change to
+# enable by default. If changed to true, the test directory corresponding
+# to the test run under LOCAL_LOG_PATH defined above will contain a report
+INCLUDE_PROFILE = False
 
 ##################################################################
 # USER SETTINGS OVERRIDES

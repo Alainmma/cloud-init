@@ -9,7 +9,7 @@ datasource:
     # The length in seconds to wait before giving up on the metadata
     # service.  The actual total wait could be up to 
     #   len(resolvable_metadata_urls)*timeout
-    max_wait : 120
+    max_wait : 240
 
     #metadata_url: a list of URLs to check for metadata services
     metadata_urls:
@@ -34,14 +34,11 @@ datasource:
     # seedfrom: http://my.example.com/i-abcde/
     seedfrom: None
 
-    # fs_label: the label on filesystems to be searched for NoCloud source
-    fs_label: cidata
-
     # these are optional, but allow you to basically provide a datasource
     # right here
     user-data: |
       # This is the user-data verbatim
-    meta-data:
+    meta-data: |
       instance-id: i-87018aed
       local-hostname: myhost.internal
 

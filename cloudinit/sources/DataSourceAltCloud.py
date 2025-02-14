@@ -13,12 +13,11 @@ instance on RHEVm and vSphere.
 """
 
 import errno
+import logging
 import os
 import os.path
 
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import sources, subp, util
+from cloudinit import dmi, sources, subp, util
 
 LOG = logging.getLogger(__name__)
 
@@ -59,10 +58,10 @@ def read_user_data_callback(mount_dir):
 
     # First try deltacloud_user_data_file. On failure try user_data_file.
     try:
-        user_data = util.load_file(deltacloud_user_data_file).strip()
+        user_data = util.load_text_file(deltacloud_user_data_file).strip()
     except IOError:
         try:
-            user_data = util.load_file(user_data_file).strip()
+            user_data = util.load_text_file(user_data_file).strip()
         except IOError:
             util.logexc(LOG, "Failed accessing user data file.")
             return None
@@ -78,6 +77,12 @@ class DataSourceAltCloud(sources.DataSource):
         sources.DataSource.__init__(self, sys_cfg, distro, paths)
         self.seed = None
         self.supported_seed_starts = ("/", "file://")
+        self.source = sources.METADATA_UNKNOWN
+
+    def _unpickle(self, ci_pkl_version: int) -> None:
+        super()._unpickle(ci_pkl_version)
+        if not hasattr(self, "source"):
+            self.source = sources.METADATA_UNKNOWN
 
     def __str__(self):
         root = sources.DataSource.__str__(self)
@@ -101,7 +106,9 @@ class DataSourceAltCloud(sources.DataSource):
         """
         if os.path.exists(CLOUD_INFO_FILE):
             try:
-                cloud_type = util.load_file(CLOUD_INFO_FILE).strip().upper()
+                cloud_type = (
+                    util.load_text_file(CLOUD_INFO_FILE).strip().upper()
+                )
             except IOError:
                 util.logexc(
                     LOG,
@@ -166,8 +173,6 @@ class DataSourceAltCloud(sources.DataSource):
     def _get_subplatform(self):
         """Return the subplatform metadata details."""
         cloud_type = self.get_cloud_type()
-        if not hasattr(self, "source"):
-            self.source = sources.METADATA_UNKNOWN
         if cloud_type == "RHEV":
             self.source = "/dev/fd0"
         return "%s (%s)" % (cloud_type.lower(), self.source)
@@ -284,6 +289,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

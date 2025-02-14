@@ -4,15 +4,15 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+import logging
 import os
 import re
 from io import StringIO
 
 import cloudinit.distros.bsd
-from cloudinit import log as logging
 from cloudinit import subp, util
 from cloudinit.distros.networking import FreeBSDNetworking
-from cloudinit.settings import PER_INSTANCE
+from cloudinit.settings import PER_ALWAYS, PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
 
@@ -36,32 +36,73 @@ class Distro(cloudinit.distros.bsd.BSD):
     pkg_cmd_upgrade_prefix = ["pkg", "upgrade"]
     prefer_fqdn = True  # See rc.conf(5) in FreeBSD
     home_dir = "/usr/home"
+    # FreeBSD has the following dhclient lease path:
+    # /var/db/dhclient.leases.<iface_name>
+    dhclient_lease_directory = "/var/db"
+    dhclient_lease_file_regex = r"dhclient.leases.\w+"
 
-    def manage_service(self, action: str, service: str):
+    # /etc/shadow match patterns indicating empty passwords
+    # For FreeBSD (from https://man.freebsd.org/cgi/man.cgi?passwd(5)) a
+    # password field of "" indicates no password, and a password
+    # field value of either "*" or "*LOCKED*" indicate differing forms of
+    # "locked" but with no password defined.
+    shadow_empty_locked_passwd_patterns = [
+        r"^{username}::",
+        r"^{username}:\*:",
+        r"^{username}:\*LOCKED\*:",
+    ]
+
+    @classmethod
+    def reload_init(cls, rcs=None):
+        """
+        Tell rc to reload its configuration
+        Note that this only works while we're still in the process of booting.
+        May raise ProcessExecutionError
+        """
+        rc_pid = os.environ.get("RC_PID")
+        if rc_pid is None:
+            LOG.warning("Unable to reload rc(8): no RC_PID in Environment")
+            return
+
+        return subp.subp(["kill", "-SIGALRM", rc_pid], capture=True, rcs=rcs)
+
+    @classmethod
+    def manage_service(
+        cls, action: str, service: str, *extra_args: str, rcs=None
+    ):
         """
         Perform the requested action on a service. This handles FreeBSD's
         'service' case. The FreeBSD 'service' is closer in features to
         'systemctl' than SysV init's 'service', so we override it.
         May raise ProcessExecutionError
         """
-        init_cmd = self.init_cmd
+        init_cmd = cls.init_cmd
         cmds = {
             "stop": [service, "stop"],
             "start": [service, "start"],
             "enable": [service, "enable"],
+            "enabled": [service, "enabled"],
             "disable": [service, "disable"],
+            "onestart": [service, "onestart"],
+            "onestop": [service, "onestop"],
             "restart": [service, "restart"],
             "reload": [service, "restart"],
             "try-reload": [service, "restart"],
             "status": [service, "status"],
+            "onestatus": [service, "onestatus"],
         }
-        cmd = list(init_cmd) + list(cmds[action])
-        return subp.subp(cmd, capture=True)
+        cmd = init_cmd + cmds[action] + list(extra_args)
+        return subp.subp(cmd, capture=True, rcs=rcs)
 
     def _get_add_member_to_group_cmd(self, member_name, group_name):
         return ["pw", "usermod", "-n", member_name, "-G", group_name]
 
-    def add_user(self, name, **kwargs):
+    def add_user(self, name, **kwargs) -> bool:
+        """
+        Add a user to the system using standard tools
+
+        Returns False if user already exists, otherwise True.
+        """
         if util.is_user(name):
             LOG.info("User %s already exists, skipping.", name)
             return False
@@ -96,14 +137,10 @@ class Distro(cloudinit.distros.bsd.BSD):
             pw_useradd_cmd.append("-d/nonexistent")
             log_pw_useradd_cmd.append("-d/nonexistent")
         else:
-            pw_useradd_cmd.append(
-                "-d{home_dir}/{name}".format(home_dir=self.home_dir, name=name)
-            )
+            homedir = kwargs.get("homedir", f"{self.home_dir}/{name}")
+            pw_useradd_cmd.append("-d" + homedir)
             pw_useradd_cmd.append("-m")
-            log_pw_useradd_cmd.append(
-                "-d{home_dir}/{name}".format(home_dir=self.home_dir, name=name)
-            )
-
+            log_pw_useradd_cmd.append("-d" + homedir)
             log_pw_useradd_cmd.append("-m")
 
         # Run the command
@@ -118,6 +155,9 @@ class Distro(cloudinit.distros.bsd.BSD):
         passwd_val = kwargs.get("passwd", None)
         if passwd_val is not None:
             self.set_passwd(name, passwd_val, hashed=True)
+
+        # Indicate that a new user was created
+        return True
 
     def expire_passwd(self, user):
         try:
@@ -144,15 +184,22 @@ class Distro(cloudinit.distros.bsd.BSD):
 
     def lock_passwd(self, name):
         try:
-            subp.subp(["pw", "usermod", name, "-h", "-"])
+            subp.subp(["pw", "usermod", name, "-w", "no"])
         except Exception:
-            util.logexc(LOG, "Failed to lock user %s", name)
+            util.logexc(LOG, "Failed to lock password login for user %s", name)
             raise
+
+    def unlock_passwd(self, name):
+        LOG.debug(
+            "Dragonfly BSD/FreeBSD password lock is not reversible, "
+            "ignoring unlock for user %s",
+            name,
+        )
 
     def apply_locale(self, locale, out_fn=None):
         # Adjust the locales value to the new value
         newconf = StringIO()
-        for line in util.load_file(self.login_conf_fn).splitlines():
+        for line in util.load_text_file(self.login_conf_fn).splitlines():
             newconf.write(
                 re.sub(r"^default:", r"default:lang=%s:" % locale, line)
             )
@@ -180,17 +227,28 @@ class Distro(cloudinit.distros.bsd.BSD):
     def _get_pkg_cmd_environ(self):
         """Return environment vars used in FreeBSD package_command
         operations"""
-        e = os.environ.copy()
-        e["ASSUME_ALWAYS_YES"] = "YES"
-        return e
+        return {"ASSUME_ALWAYS_YES": "YES"}
 
-    def update_package_sources(self):
+    def update_package_sources(self, *, force=False):
         self._runner.run(
             "update-sources",
             self.package_command,
             ["update"],
-            freq=PER_INSTANCE,
+            freq=PER_ALWAYS if force else PER_INSTANCE,
         )
 
+    @staticmethod
+    def build_dhclient_cmd(
+        path: str,
+        lease_file: str,
+        pid_file: str,
+        interface: str,
+        config_file: str,
+    ) -> list:
+        return [path, "-l", lease_file, "-p", pid_file] + (
+            ["-c", config_file, interface] if config_file else [interface]
+        )
 
-# vi: ts=4 expandtab
+    @staticmethod
+    def eject_media(device: str) -> None:
+        subp.subp(["camcontrol", "eject", device])

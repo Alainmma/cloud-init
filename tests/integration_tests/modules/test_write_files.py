@@ -51,6 +51,13 @@ write_files:
     owner: 'myuser'
     permissions: '0644'
     append: true
+-   path: '/home/testuser/subdir1/subdir2/my-file'
+    content: |
+      echo 'hello world!'
+    defer: true
+    owner: 'myuser'
+    permissions: '0644'
+    append: true
 """.format(
     B64_CONTENT.decode("ascii")
 )
@@ -62,7 +69,7 @@ class TestWriteFiles:
     @pytest.mark.parametrize(
         "cmd,expected_out",
         (
-            ("file /root/file_b64", ASCII_TEXT),
+            ("md5sum </root/file_b64", "84baab0d01c1374924dcedfb5972697c"),
             ("md5sum </root/file_binary", "3801184b97bb8c6e63fa0e1eae2920d7"),
             (
                 "sha256sum </root/file_binary",
@@ -70,10 +77,10 @@ class TestWriteFiles:
                 "7a803cd83d5e4f269e28f5090f0f2c9a",
             ),
             (
-                "file /root/file_gzip",
-                "POSIX shell script, ASCII text executable",
+                "md5sum </root/file_gzip",
+                "ec96d4a61ed762f0ff3725e1140661de",
             ),
-            ("file /root/file_text", ASCII_TEXT),
+            ("md5sum </root/file_text", "a2b6d22fa3d7aa551e22bb0c8acd9121"),
         ),
     )
     def test_write_files(self, cmd, expected_out, class_client):
@@ -97,3 +104,25 @@ class TestWriteFiles:
         class_client.restart()
         out = class_client.read_from_file("/home/testuser/my-file")
         assert "echo 'hello world!'" == out
+
+    def test_write_files_deferred_with_newly_created_dir(self, class_client):
+        """Test that newly created directory works as expected.
+
+        Users get created after write_files module runs, so ensure that
+        with `defer: true`, the file and directories gets written with correct
+        ownership.
+        """
+        out = class_client.read_from_file(
+            "/home/testuser/subdir1/subdir2/my-file"
+        )
+        assert "echo 'hello world!'" == out
+        assert (
+            class_client.execute(
+                'stat -c "%U %a" /home/testuser/subdir1/subdir2'
+            )
+            == "myuser 755"
+        )
+        assert (
+            class_client.execute('stat -c "%U %a" /home/testuser/subdir1')
+            == "myuser 755"
+        )

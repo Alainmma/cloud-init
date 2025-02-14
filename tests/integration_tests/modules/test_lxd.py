@@ -3,14 +3,17 @@
 (This is ported from
 ``tests/cloud_tests/testcases/modules/lxd_bridge.yaml``.)
 """
+
 import warnings
 
 import pytest
 import yaml
 
-from tests.integration_tests.clouds import ImageSpecification, IntegrationCloud
+from tests.integration_tests.clouds import IntegrationCloud
 from tests.integration_tests.instances import IntegrationInstance
-from tests.integration_tests.util import verify_clean_log
+from tests.integration_tests.integration_settings import PLATFORM
+from tests.integration_tests.releases import CURRENT_RELEASE, FOCAL
+from tests.integration_tests.util import verify_clean_boot, verify_clean_log
 
 BRIDGE_USER_DATA = """\
 #cloud-config
@@ -149,7 +152,9 @@ lxd:
 """
 
 
-@pytest.mark.no_container
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot run LXD"
+)
 @pytest.mark.user_data(BRIDGE_USER_DATA)
 class TestLxdBridge:
     @pytest.mark.parametrize("binary_name", ["lxc", "lxd"])
@@ -161,6 +166,7 @@ class TestLxdBridge:
         """Check that the given bridge is configured"""
         cloud_init_log = class_client.read_from_file("/var/log/cloud-init.log")
         verify_clean_log(cloud_init_log)
+        verify_clean_boot(class_client)
 
         # The bridge should exist
         assert class_client.execute("ip addr show lxdbr0").ok
@@ -173,6 +179,7 @@ class TestLxdBridge:
 def validate_storage(validate_client, pkg_name, command):
     log = validate_client.read_from_file("/var/log/cloud-init.log")
     verify_clean_log(log, ignore_deprecations=False)
+    verify_clean_boot(validate_client)
     return log
 
 
@@ -201,8 +208,8 @@ def validate_preseed_storage_pools(client, preseed_cfg):
 
 def validate_preseed_projects(client: IntegrationInstance, preseed_cfg):
     # Support for projects by lxd init --preseed was added in lxd 4.12
-    # https://discuss.linuxcontainers.org/t/lxd-4-12-has-been-released/10424#projects-now-supported-by-lxd-init-dump-and-preseed-9
-    if ImageSpecification.from_os_image().release in ("bionic", "focal"):
+    # https://github.com/canonical/lxd/releases/tag/lxd-4.12
+    if CURRENT_RELEASE.series in ("bionic", "focal"):
         return
     for src_project in preseed_cfg.get("projects", []):
         proj_name = src_project["name"]
@@ -215,28 +222,34 @@ def validate_preseed_projects(client: IntegrationInstance, preseed_cfg):
         )
         project.pop("used_by", None)
 
-        # `features.storage.buckets` was introduced in lxd 5.5 . More info:
-        # https://discuss.linuxcontainers.org/t/lxd-5-5-has-been-released/14899
+        # `features.storage.buckets` was introduced in lxd 5.5. More info:
+        # https://github.com/canonical/lxd/releases/tag/lxd-5.5
         if "features.storage.buckets" in project["config"]:
             assert "true" == project["config"].pop("features.storage.buckets")
         # `features.networks.zones` was introduced in lxd 5.9. More info:
-        # https://discuss.linuxcontainers.org/t/lxd-5-9-has-been-released/
+        # https://github.com/canonical/lxd/releases/tag/lxd-5.9
         if "features.networks.zones" in project["config"]:
             assert "true" == project["config"].pop("features.networks.zones")
         assert project == src_project
 
 
-@pytest.mark.no_container
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot manipulate storage"
+)
 @pytest.mark.user_data(STORAGE_USER_DATA.format("btrfs"))
 def test_storage_btrfs(client):
     validate_storage(client, "btrfs-progs", "mkfs.btrfs")
 
 
-@pytest.mark.no_container
-@pytest.mark.not_bionic
-def test_storage_preseed_btrfs(setup_image, session_cloud: IntegrationCloud):
-    cfg_image_spec = ImageSpecification.from_os_image()
-    if cfg_image_spec.release in ("bionic",):
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot manipulate LXD"
+)
+@pytest.mark.skipif(
+    CURRENT_RELEASE < FOCAL, reason="tested on Focal and later"
+)
+def test_storage_preseed_btrfs(session_cloud: IntegrationCloud):
+    # TODO: If test is marked as not bionic, why is there a bionic section?
+    if CURRENT_RELEASE.series in ("bionic",):
         nictype = "nictype: bridged"
         parent = "parent: lxdbr0"
         network = ""
@@ -256,7 +269,9 @@ def test_storage_preseed_btrfs(setup_image, session_cloud: IntegrationCloud):
         validate_preseed_projects(client, preseed_cfg)
 
 
-@pytest.mark.no_container
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot manipulate LVM"
+)
 @pytest.mark.user_data(STORAGE_USER_DATA.format("lvm"))
 def test_storage_lvm(client):
     log = client.read_from_file("/var/log/cloud-init.log")
@@ -276,22 +291,29 @@ def test_basic_preseed(client):
     preseed_cfg = yaml.safe_load(preseed_cfg)
     cloud_init_log = client.read_from_file("/var/log/cloud-init.log")
     verify_clean_log(cloud_init_log)
+    verify_clean_boot(client)
     validate_preseed_profiles(client, preseed_cfg)
     validate_preseed_storage_pools(client, preseed_cfg)
     validate_preseed_projects(client, preseed_cfg)
 
 
-@pytest.mark.no_container
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot manipulate ZFS"
+)
 @pytest.mark.user_data(STORAGE_USER_DATA.format("zfs"))
 def test_storage_zfs(client):
     validate_storage(client, "zfsutils-linux", "zpool")
 
 
-@pytest.mark.no_container
-@pytest.mark.not_bionic
-def test_storage_preseed_zfs(setup_image, session_cloud: IntegrationCloud):
-    cfg_image_spec = ImageSpecification.from_os_image()
-    if cfg_image_spec.release in ("bionic",):
+@pytest.mark.skipif(
+    PLATFORM == "lxd_container", reason="Containers cannot manipulate LXD"
+)
+@pytest.mark.skipif(
+    CURRENT_RELEASE < FOCAL, reason="Tested on focal and later"
+)
+def test_storage_preseed_zfs(session_cloud: IntegrationCloud):
+    # TODO: If test is marked as not bionic, why is there a bionic section?
+    if CURRENT_RELEASE.series in ("bionic",):
         nictype = "nictype: bridged"
         parent = "parent: lxdbr0"
         network = ""

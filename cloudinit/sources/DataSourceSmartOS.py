@@ -25,16 +25,13 @@ import binascii
 import errno
 import fcntl
 import json
+import logging
 import os
 import random
 import re
 import socket
 
-import serial
-
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import sources, subp, util
+from cloudinit import atomic_helper, dmi, sources, subp, util
 from cloudinit.event import EventScope, EventType
 
 LOG = logging.getLogger(__name__)
@@ -191,6 +188,7 @@ class DataSourceSmartOS(sources.DataSource):
         self.metadata = {}
         self.network_data = None
         self._network_config = None
+        self.routes_data = None
 
         self.script_base_d = os.path.join(self.paths.get_cpath("scripts"))
 
@@ -419,12 +417,12 @@ class JoyentMetadataClient:
         if not frame_data.get("payload", None):
             LOG.debug("No value found.")
             return None
-        value = util.b64d(frame_data["payload"])
+        value = atomic_helper.b64d(frame_data["payload"])
         LOG.debug('Value "%s" found.', value)
         return value
 
     def _readline(self):
-        """
+        r"""
         Reads a line a byte at a time until \n is encountered.  Returns an
         ascii string with the trailing newline removed.
 
@@ -440,7 +438,7 @@ class JoyentMetadataClient:
         while True:
             try:
                 byte = self.fp.read(1)
-                if len(byte) == 0:
+                if not byte:
                     raise JoyentMetadataTimeoutException(msg % as_ascii())
                 if byte == b"\n":
                     return as_ascii()
@@ -526,9 +524,6 @@ class JoyentMetadataClient:
         ).decode()
         return self.request(rtype="PUT", param=param)
 
-    def delete(self, key):
-        return self.request(rtype="DELETE", param=key)
-
     def close_transport(self):
         if self.fp:
             self.fp.close()
@@ -579,6 +574,12 @@ class JoyentMetadataSerialClient(JoyentMetadataClient):
 
     def open_transport(self):
         if self.fp is None:
+            try:
+                import serial
+            except ImportError as e:
+                raise NotImplementedError(
+                    "serial support is not available"
+                ) from e
             ser = serial.Serial(self.device, timeout=self.timeout)
             if not ser.isOpen():
                 raise SystemError("Unable to open %s" % self.device)
@@ -647,7 +648,7 @@ class JoyentMetadataLegacySerialClient(JoyentMetadataSerialClient):
       b.) base64_all: string interpreted as a boolean that indicates
           if all keys are base64 encoded.
       c.) set a key named b64-<keyname> with a boolean indicating that
-          <keyname> is base64 encoded."""
+    <keyname> is base64 encoded."""
 
     def __init__(self, device, timeout=10, smartos_type=None):
         s = super(JoyentMetadataLegacySerialClient, self)
@@ -779,7 +780,7 @@ def write_boot_content(
     @param shebang: if no file magic, set shebang
     @param mode: file mode
 
-    Becuase of the way that Cloud-init executes scripts (no shell),
+    Because of the way that Cloud-init executes scripts (no shell),
     a script will fail to execute if does not have a magic bit (shebang) set
     for the file. If shebang=True, then the script will be checked for a magic
     bit and to the SmartOS default of assuming that bash.
@@ -926,6 +927,8 @@ def convert_smartos_network_data(
         for ip in nic.get("ips", []):
             if ip == "dhcp":
                 subnet = {"type": "dhcp4"}
+            elif ip == "addrconf":
+                subnet = {"type": "dhcp6"}
             else:
                 routeents = []
                 subnet = dict(
@@ -1055,5 +1058,3 @@ if __name__ == "__main__":
         load_key(client=jmc, key=key, data=data)
 
     print(json.dumps(data, indent=1, sort_keys=True, separators=(",", ": ")))
-
-# vi: ts=4 expandtab

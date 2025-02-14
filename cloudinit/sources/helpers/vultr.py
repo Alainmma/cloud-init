@@ -3,37 +3,35 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import json
+import logging
+import os
 from functools import lru_cache
 
 from requests import exceptions
 
-from cloudinit import dmi
-from cloudinit import log as log
-from cloudinit import net, netinfo, subp, url_helper, util
+from cloudinit import dmi, net, subp, url_helper, util
 from cloudinit.net.dhcp import NoDHCPLeaseError
 from cloudinit.net.ephemeral import EphemeralDHCPv4
 
 # Get LOG
-LOG = log.getLogger(__name__)
+LOG = logging.getLogger(__name__)
 
 
 @lru_cache()
-def get_metadata(url, timeout, retries, sec_between, agent, tmp_dir=None):
-    # Bring up interface (and try untill one works)
+def get_metadata(
+    distro, url, timeout, retries, sec_between, agent, tmp_dir=None
+):
+    # Bring up interface (and try until one works)
     exception = RuntimeError("Failed to DHCP")
 
     # Seek iface with DHCP
     for iface in get_interface_list():
         try:
             with EphemeralDHCPv4(
+                distro,
                 iface=iface,
-                connectivity_url_data={"url": url},
-                tmp_dir=tmp_dir,
+                connectivity_urls_data=[{"url": url}],
             ):
-                # Check for the metadata route, skip if not there
-                if not check_route(url):
-                    continue
-
                 # Fetch the metadata
                 v1 = read_metadata(url, timeout, retries, sec_between, agent)
 
@@ -63,32 +61,31 @@ def refactor_metadata(metadata):
 
 # Get interface list, sort, and clean
 def get_interface_list():
+    # Check for the presence of a "find_candidate_nics.sh" shell script on the
+    # running guest image. Use that as an optional source of truth before
+    # falling back to "net.find_candidate_nics()". This allows the Vultr team
+    # to provision machines with niche hardware configurations at the same
+    # cadence as image rollouts.
     ifaces = []
-    for iface in net.find_candidate_nics():
-        # Skip dummy
-        if "dummy" in iface:
-            continue
-        ifaces.append(iface)
+    try:
+        nic_script = "/opt/vultr/find_candidate_nics.sh"
+        if os.path.exists(nic_script):
+            out = subp.subp(nic_script, capture=True, shell=True)
+            for line in out.stdout.splitlines():
+                iface = line.strip()
+                if len(iface) > 0:
+                    ifaces.append(iface)
+    except Exception as e:
+        LOG.error("find_candidate_nics script exception: %s", e)
+
+    if not ifaces:
+        for iface in net.find_candidate_nics():
+            # Skip dummy
+            if "dummy" in iface:
+                continue
+            ifaces.append(iface)
 
     return ifaces
-
-
-# Check for /32 route that our dhcp servers inject
-# in order to determine if this a customer-run dhcp server
-def check_route(url):
-    # Get routes, confirm entry exists
-    routes = netinfo.route_info()
-
-    # If no tools exist and empty dict is returned
-    if "ipv4" not in routes:
-        return False
-
-    # Parse each route into a more searchable format
-    for route in routes["ipv4"]:
-        if route.get("destination", None) in url:
-            return True
-
-    return False
 
 
 # Read the system information from SMBIOS
@@ -276,17 +273,14 @@ def generate_interface_additional_addresses(interface, netcfg):
 
 
 # Make required adjustments to the network configs provided
-def add_interface_names(interfaces):
-    for interface in interfaces:
-        interface_name = get_interface_name(interface["mac"])
+def add_interface_names(netcfg):
+    for interface in netcfg["config"]:
+        if interface["type"] != "physical":
+            continue
+        interface_name = get_interface_name(interface["mac_address"])
         if not interface_name:
             raise RuntimeError(
                 "Interface: %s could not be found on the system"
-                % interface["mac"]
+                % interface["mac_address"]
             )
         interface["name"] = interface_name
-
-    return interfaces
-
-
-# vi: ts=4 expandtab

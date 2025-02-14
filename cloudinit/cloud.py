@@ -5,10 +5,10 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import copy
+import logging
 import os
 from typing import Optional
 
-from cloudinit import log as logging
 from cloudinit.distros import Distro
 from cloudinit.helpers import Paths, Runners
 from cloudinit.reporting import events
@@ -51,19 +51,23 @@ class Cloud:
             )
         self.reporter = reporter
 
-    # If a 'user' manipulates logging or logging services
-    # it is typically useful to cause the logging to be
-    # setup again.
-    def cycle_logging(self):
-        logging.resetLogging()
-        logging.setupLogging(self.cfg)
-
     @property
     def cfg(self):
         # Ensure that cfg is not indirectly modified
         return copy.deepcopy(self._cfg)
 
     def run(self, name, functor, args, freq=None, clear_on_fail=False):
+        """Run a function gated by a named semaphore for a desired frequency.
+
+        The typical case for this method would be to limit running of the
+        provided func to a single well-defined frequency:
+            PER_INSTANCE, PER_BOOT or PER_ONCE
+
+        The semaphore provides a gate that persists across cloud-init
+        boot stage boundaries so multiple modules can share this state
+        even if they happen to be run in different boot stages or across
+        reboots.
+        """
         return self._runners.run(name, functor, args, freq, clear_on_fail)
 
     def get_template_filename(self, name):
@@ -110,6 +114,3 @@ class Cloud:
 
     def get_ipath(self, name=None):
         return self.paths.get_ipath(name)
-
-
-# vi: ts=4 expandtab

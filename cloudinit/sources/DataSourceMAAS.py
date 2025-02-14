@@ -7,11 +7,13 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import hashlib
+import logging
 import os
 import time
 
-from cloudinit import log as logging
 from cloudinit import sources, url_helper, util
+from cloudinit.net.cmdline import KlibcNetworkConfigSource
+from cloudinit.sources import NetworkConfigSource
 
 LOG = logging.getLogger(__name__)
 MD_VERSION = "2012-03-01"
@@ -40,6 +42,10 @@ class DataSourceMAAS(sources.DataSource):
     dsname = "MAAS"
     id_hash = None
     _oauth_helper = None
+
+    # Setup read_url parameters per get_url_params.
+    url_max_wait = 120
+    url_timeout = 50
 
     def __init__(self, sys_cfg, distro, paths):
         sources.DataSource.__init__(self, sys_cfg, distro, paths)
@@ -102,7 +108,6 @@ class DataSourceMAAS(sources.DataSource):
         ud, md, vd = data
         self.userdata_raw = ud
         self.metadata = md
-        self.vendordata_pure = vd
         if vd:
             try:
                 self.vendordata_raw = sources.convert_vendordata(vd)
@@ -115,30 +120,18 @@ class DataSourceMAAS(sources.DataSource):
         return "seed-dir (%s)" % self.base_url
 
     def wait_for_metadata_service(self, url):
-        mcfg = self.ds_cfg
-        max_wait = 120
-        try:
-            max_wait = int(mcfg.get("max_wait", max_wait))
-        except Exception:
-            util.logexc(LOG, "Failed to get max wait. using %s", max_wait)
-
-        if max_wait == 0:
+        url_params = self.get_url_params()
+        if url_params.max_wait_seconds == 0:
             return False
 
-        timeout = 50
-        try:
-            if timeout in mcfg:
-                timeout = int(mcfg.get("timeout", timeout))
-        except Exception:
-            LOG.warning("Failed to get timeout, using %s", timeout)
-
-        starttime = time.time()
-        if url.endswith("/"):
-            url = url[:-1]
+        starttime = time.monotonic()
+        url = url.rstrip("/")
         check_url = "%s/%s/meta-data/instance-id" % (url, MD_VERSION)
         urls = [check_url]
         url, _response = self.oauth_helper.wait_for_url(
-            urls=urls, max_wait=max_wait, timeout=timeout
+            urls=urls,
+            max_wait=url_params.max_wait_seconds,
+            timeout=url_params.timeout_seconds,
         )
 
         if url:
@@ -147,7 +140,7 @@ class DataSourceMAAS(sources.DataSource):
             LOG.critical(
                 "Giving up on md from %s after %i seconds",
                 urls,
-                int(time.time() - starttime),
+                int(time.monotonic() - starttime),
             )
 
         return bool(url)
@@ -164,11 +157,29 @@ class DataSourceMAAS(sources.DataSource):
         return self.id_hash == get_id_from_ds_cfg(ncfg)
 
 
+class DataSourceMAASLocal(DataSourceMAAS):
+    network_config_sources = (
+        NetworkConfigSource.CMD_LINE,
+        NetworkConfigSource.SYSTEM_CFG,
+        NetworkConfigSource.DS,
+        NetworkConfigSource.INITRAMFS,
+    )
+
+    def _get_data(self):
+        if not KlibcNetworkConfigSource().is_applicable():
+            # We booted from disk. Initramfs didn't bring up a network, so
+            # nothing to do. Wait until network timeframe to run _get_data()
+            LOG.debug("No initramfs applicable config")
+            return False
+        LOG.debug("Found initramfs applicable config")
+        return super()._get_data()
+
+
 def get_oauth_helper(cfg):
     """Return an oauth helper instance for values in cfg.
 
     @raises ValueError from OauthUrlHelper if some required fields have
-            true-ish values but others do not."""
+    true-ish values but others do not."""
     keys = ("consumer_key", "consumer_secret", "token_key", "token_secret")
     kwargs = dict([(r, cfg.get(r)) for r in keys])
     return url_helper.OauthUrlHelper(**kwargs)
@@ -186,7 +197,7 @@ def get_id_from_ds_cfg(ds_cfg):
 def read_maas_seed_dir(seed_d):
     if seed_d.startswith("file://"):
         seed_d = seed_d[7:]
-    if not os.path.isdir(seed_d) or len(os.listdir(seed_d)) == 0:
+    if not os.path.isdir(seed_d) or not os.listdir(seed_d):
         raise MAASSeedDirNone("%s: not a directory")
 
     # seed_dir looks in seed_dir, not seed_dir/VERSION
@@ -272,7 +283,7 @@ def check_seed_contents(content, seed):
         else:
             ret[dpath] = content[spath]
 
-    if len(ret) == 0:
+    if not ret:
         raise MAASSeedDirNone("%s: no data files found" % seed)
 
     if missing:
@@ -300,6 +311,7 @@ class MAASSeedDirMalformed(Exception):
 
 # Used to match classes to dependencies
 datasources = [
+    (DataSourceMAASLocal, (sources.DEP_FILESYSTEM,)),
     (DataSourceMAAS, (sources.DEP_FILESYSTEM, sources.DEP_NETWORK)),
 ]
 
@@ -360,7 +372,7 @@ if __name__ == "__main__":
         )
 
         subcmds = parser.add_subparsers(title="subcommands", dest="subcmd")
-        for (name, help) in (
+        for name, help in (
             ("crawl", "crawl the datasource"),
             ("get", "do a single GET of provided url"),
             ("check-seed", "read and verify seed at url"),
@@ -450,5 +462,3 @@ if __name__ == "__main__":
             crawl(args.url)
 
     main()
-
-# vi: ts=4 expandtab

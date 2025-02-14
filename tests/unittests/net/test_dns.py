@@ -2,7 +2,8 @@
 
 from unittest import mock
 
-from cloudinit import safeyaml
+import yaml
+
 from cloudinit.net import network_state
 
 
@@ -15,7 +16,7 @@ class TestNetDns:
         by_mac_state.return_value = {"00:11:22:33:44:55": "foobar"}
         by_mac_init.return_value = {"00:11:22:33:44:55": "foobar"}
         state = network_state.parse_net_config_data(
-            safeyaml.load(
+            yaml.safe_load(
                 """\
 version: 2
 ethernets:
@@ -29,4 +30,6 @@ ethernets:
 """
             )
         )
-        assert "10.0.0.3" in state.dns_nameservers
+        assert (
+            "10.0.0.3" in next(state.iter_interfaces())["dns"]["nameservers"]
+        )

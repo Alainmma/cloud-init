@@ -7,12 +7,19 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 
 import copy
+import logging
+from inspect import signature
 from types import ModuleType
 from typing import Dict, List, NamedTuple, Optional
 
-from cloudinit import config, importer
-from cloudinit import log as logging
-from cloudinit import type_utils, util
+from cloudinit import (
+    config,
+    importer,
+    lifecycle,
+    performance,
+    type_utils,
+    util,
+)
 from cloudinit.distros import ALL_DISTROS
 from cloudinit.helpers import ConfigMerger
 from cloudinit.reporting.events import ReportEventStack
@@ -26,6 +33,18 @@ LOG = logging.getLogger(__name__)
 # we will not find something else with the same
 # name in the lookup path...
 MOD_PREFIX = "cc_"
+
+# List of modules that have removed upstream. This prevents every downstream
+# from having to create upgrade scripts to avoid warnings about missing
+# modules.
+REMOVED_MODULES = [
+    "cc_migrator",  # Removed in 24.1
+    "cc_rightscale_userdata",  # Removed in 24.1
+]
+
+RENAMED_MODULES = {
+    "cc_ubuntu_advantage": "cc_ubuntu_pro",  # Renamed 24.1
+}
 
 
 class ModuleDetails(NamedTuple):
@@ -182,23 +201,42 @@ class Modules:
             if not mod_name:
                 continue
             if freq and freq not in FREQUENCIES:
-                LOG.warning(
-                    "Config specified module %s has an unknown frequency %s",
-                    raw_name,
-                    freq,
+                lifecycle.deprecate(
+                    deprecated=(
+                        f"Config specified module {raw_name} has an unknown"
+                        f" frequency {freq}"
+                    ),
+                    deprecated_version="22.1",
                 )
                 # Misconfigured in /etc/cloud/cloud.cfg. Reset so cc_* module
                 # default meta attribute "frequency" value is used.
                 freq = None
+            if mod_name in RENAMED_MODULES:
+                lifecycle.deprecate(
+                    deprecated=(
+                        f"Module has been renamed from {mod_name} to "
+                        f"{RENAMED_MODULES[mod_name]}. Update any"
+                        " references in /etc/cloud/cloud.cfg"
+                    ),
+                    deprecated_version="24.1",
+                )
+                mod_name = RENAMED_MODULES[mod_name]
             mod_locs, looked_locs = importer.find_module(
                 mod_name, ["", type_utils.obj_name(config)], ["handle"]
             )
             if not mod_locs:
-                LOG.warning(
-                    "Could not find module named %s (searched %s)",
-                    mod_name,
-                    looked_locs,
-                )
+                if mod_name in REMOVED_MODULES:
+                    LOG.info(
+                        "Module `%s` has been removed from cloud-init. "
+                        "It may be removed from `/etc/cloud/cloud.cfg`.",
+                        mod_name[3:],  # [3:] to remove 'cc_'
+                    )
+                else:
+                    LOG.warning(
+                        "Could not find module named %s (searched %s)",
+                        mod_name,
+                        looked_locs,
+                    )
                 continue
             mod = importer.import_module(mod_locs[0])
             validate_module(mod, raw_name)
@@ -221,17 +259,12 @@ class Modules:
         # and which ones failed + the exception of why it failed
         failures = []
         which_ran = []
-        for (mod, name, freq, args) in mostly_mods:
+        for mod, name, freq, args in mostly_mods:
             try:
                 LOG.debug(
                     "Running module %s (%s) with frequency %s", name, mod, freq
                 )
 
-                # Use the configs logger and not our own
-                # TODO(harlowja): possibly check the module
-                # for having a LOG attr and just give it back
-                # its own logger?
-                func_args = [name, self.cfg, cc, LOG, args]
                 # Mark it as having started running
                 which_ran.append(name)
                 # This name will affect the semaphore name created
@@ -241,13 +274,32 @@ class Modules:
                 myrep = ReportEventStack(
                     name=run_name, description=desc, parent=self.reporter
                 )
+                func_args = {
+                    "name": name,
+                    "cfg": self.cfg,
+                    "cloud": cc,
+                    "args": args,
+                }
 
                 with myrep:
-                    ran, _r = cc.run(
-                        run_name, mod.handle, func_args, freq=freq
-                    )
+                    func_signature = signature(mod.handle)
+                    func_params = func_signature.parameters
+                    if len(func_params) == 5:
+                        lifecycle.deprecate(
+                            deprecated="Config modules with a `log` parameter",
+                            deprecated_version="23.2",
+                        )
+                        func_args.update({"log": LOG})
+
+                    with performance.Timed("", log_mode="skip") as timer:
+                        ran, _r = cc.run(
+                            run_name, mod.handle, func_args, freq=freq
+                        )
                     if ran:
-                        myrep.message = "%s ran successfully" % run_name
+                        myrep.message = (
+                            f"{run_name} ran successfully and "
+                            f"took {timer.delta:.3f} seconds"
+                        )
                     else:
                         myrep.message = "%s previously ran" % run_name
 

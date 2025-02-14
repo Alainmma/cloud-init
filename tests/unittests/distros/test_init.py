@@ -9,7 +9,12 @@ from unittest import mock
 
 import pytest
 
-from cloudinit.distros import LDH_ASCII_CHARS, _get_package_mirror_info
+from cloudinit.distros import (
+    LDH_ASCII_CHARS,
+    PackageInstallerError,
+    _get_package_mirror_info,
+)
+from tests.unittests.distros import _get_distro
 
 # In newer versions of Python, these characters will be omitted instead
 # of substituted because of security concerns.
@@ -27,6 +32,8 @@ for separator in [":", ".", "/", "#", "?", "@", "[", "]"]:
     # "."), terminate hostnames ("/", "#", "?", "@"), or cause Python to be
     # unable to parse URLs ("[", "]").
     INVALID_URL_CHARS.remove(separator)
+
+M_PATH = "cloudinit.distros.package_management."
 
 
 class TestGetPackageMirrorInfo:
@@ -246,3 +253,299 @@ class TestGetPackageMirrorInfo:
         print(patterns)
         print(expected)
         assert {"primary": expected} == ret
+
+
+class TestUpdatePackageSources:
+    """Tests for cloudinit.distros.Distro.update_package_sources."""
+
+    @pytest.mark.parametrize(
+        "apt_error,snap_error,expected_logs",
+        [
+            pytest.param(
+                RuntimeError("fail to find 'apt' command"),
+                None,
+                [
+                    "Failed to update package using apt: fail to find 'apt'"
+                    " command"
+                ],
+            ),
+            pytest.param(
+                None,
+                RuntimeError("fail to find 'snap' command"),
+                [
+                    "Failed to update package using snap: fail to find 'snap'"
+                    " command"
+                ],
+            ),
+        ],
+    )
+    def test_log_errors_with_updating_package_source(
+        self, apt_error, snap_error, expected_logs, mocker, caplog
+    ):
+        """Log error raised from any package_manager.update_package_sources."""
+        mocker.patch(M_PATH + "apt.Apt.available", return_value=True)
+        mocker.patch(M_PATH + "snap.Snap.available", return_value=True)
+        mocker.patch(
+            M_PATH + "apt.Apt.update_package_sources",
+            side_effect=apt_error,
+        )
+        mocker.patch(
+            M_PATH + "snap.Snap.update_package_sources",
+            side_effect=snap_error,
+        )
+        _get_distro("ubuntu").update_package_sources()
+        for log in expected_logs:
+            assert log in caplog.text
+
+    @pytest.mark.parametrize(
+        "apt_available,snap_available,expected_logs",
+        [
+            pytest.param(
+                True,
+                False,
+                ["Skipping update for package manager 'snap': not available."],
+            ),
+            pytest.param(
+                False,
+                True,
+                ["Skipping update for package manager 'apt': not available."],
+            ),
+            pytest.param(
+                False,
+                False,
+                [
+                    "Skipping update for package manager 'apt': not"
+                    " available.",
+                    "Skipping update for package manager 'snap': not"
+                    " available.",
+                ],
+            ),
+        ],
+    )
+    def test_run_available_package_managers(
+        self, apt_available, snap_available, expected_logs, mocker, caplog
+    ):
+        """Avoid update_package_sources on unavailable package managers"""
+
+        mocker.patch(M_PATH + "apt.Apt.available", return_value=apt_available)
+        mocker.patch(
+            M_PATH + "snap.Snap.available",
+            return_value=snap_available,
+        )
+
+        m_apt_update = mocker.patch(M_PATH + "apt.Apt.update_package_sources")
+        m_snap_update = mocker.patch(
+            M_PATH + "snap.Snap.update_package_sources"
+        )
+        _get_distro("ubuntu").update_package_sources()
+        if not snap_available:
+            m_snap_update.assert_not_called()
+        else:
+            m_snap_update.assert_called_once()
+        if not apt_available:
+            m_apt_update.assert_not_called()
+        else:
+            m_apt_update.assert_called_once()
+        for log in expected_logs:
+            assert log in caplog.text
+
+
+class TestInstall:
+    """Tests for cloudinit.distros.Distro.install_packages."""
+
+    @pytest.fixture(autouse=True)
+    def ensure_available(self, mocker):
+        mocker.patch(M_PATH + "apt.Apt.available", return_value=True)
+        mocker.patch(M_PATH + "snap.Snap.available", return_value=True)
+
+    @pytest.fixture
+    def m_apt_install(self, mocker):
+        return mocker.patch(
+            M_PATH + "apt.Apt.install_packages",
+            return_value=[],
+        )
+
+    @pytest.fixture
+    def m_snap_install(self, mocker):
+        return mocker.patch(
+            M_PATH + "snap.Snap.install_packages",
+            return_value=[],
+        )
+
+    @pytest.fixture
+    def m_subp(self, mocker):
+        return mocker.patch(
+            "cloudinit.distros.bsd.subp.subp", return_value=("", "")
+        )
+
+    def test_invalid_yaml(self, m_apt_install):
+        """Test that an invalid YAML raises an exception."""
+        with pytest.raises(ValueError):
+            _get_distro("debian").install_packages([["invalid"]])
+        m_apt_install.assert_not_called()
+
+    def test_unknown_package_manager(self, m_apt_install, caplog):
+        """Test that an unknown package manager raises an exception."""
+        _get_distro("debian").install_packages(
+            [{"apt": ["pkg1"]}, "pkg2", {"invalid": ["pkg3"]}]
+        )
+        assert (
+            "Cannot install packages under 'invalid' as it is not a supported "
+            "package manager!" in caplog.text
+        )
+        install_args = m_apt_install.call_args_list[0][0][0]
+        assert "pkg1" in install_args
+        assert "pkg2" in install_args
+        assert "pkg3" not in install_args
+
+    def test_non_default_package_manager(self, m_apt_install, m_snap_install):
+        """Test success from package manager not supported by distro."""
+        _get_distro("debian").install_packages(
+            [{"apt": ["pkg1"]}, "pkg2", {"snap": ["pkg3"]}]
+        )
+        apt_install_args = m_apt_install.call_args_list[0][0][0]
+        assert "pkg1" in apt_install_args
+        assert "pkg2" in apt_install_args
+        assert "pkg3" not in apt_install_args
+
+        assert "pkg3" in m_snap_install.call_args_list[0][1]["pkglist"]
+
+    def test_non_default_package_manager_fail(
+        self, m_apt_install, mocker, caplog
+    ):
+        """Test fail from package manager not supported by distro."""
+        m_snap_install = mocker.patch(
+            M_PATH + "snap.Snap.install_packages",
+            return_value=["pkg3"],
+        )
+        with pytest.raises(
+            PackageInstallerError,
+            match="Failed to install the following packages: {'pkg3'}",
+        ):
+            _get_distro("debian").install_packages(
+                [{"apt": ["pkg1"]}, "pkg2", {"snap": ["pkg3"]}]
+            )
+
+        assert "pkg3" in m_snap_install.call_args_list[0][1]["pkglist"]
+
+    def test_default_and_specific_package_manager(
+        self, m_apt_install, m_snap_install
+    ):
+        """Test success from package manager not supported by distro."""
+        _get_distro("ubuntu").install_packages(
+            ["pkg1", ["pkg3", "ver3"], {"apt": [["pkg2", "ver2"]]}]
+        )
+        apt_install_args = m_apt_install.call_args_list[0][0][0]
+        assert "pkg1" in apt_install_args
+        assert ("pkg2", "ver2") in apt_install_args
+        assert "pkg3" not in apt_install_args
+
+        m_snap_install.assert_not_called()
+
+    def test_specific_package_manager_fail_doesnt_retry(
+        self, mocker, m_snap_install
+    ):
+        """Test fail from package manager doesn't retry as generic."""
+        m_apt_install = mocker.patch(
+            M_PATH + "apt.Apt.install_packages",
+            return_value=["pkg1"],
+        )
+        with pytest.raises(PackageInstallerError):
+            _get_distro("ubuntu").install_packages([{"apt": ["pkg1"]}])
+        apt_install_args = m_apt_install.call_args_list[0][0][0]
+        assert "pkg1" in apt_install_args
+        m_snap_install.assert_not_called()
+
+    def test_no_attempt_if_no_package_manager(
+        self, mocker, m_apt_install, m_snap_install, caplog
+    ):
+        """Test that no attempt is made if there are no package manager."""
+        mocker.patch(M_PATH + "apt.Apt.available", return_value=False)
+        mocker.patch(M_PATH + "snap.Snap.available", return_value=False)
+        with pytest.raises(PackageInstallerError):
+            _get_distro("ubuntu").install_packages(
+                ["pkg1", "pkg2", {"other": "pkg3"}]
+            )
+        m_apt_install.assert_not_called()
+        m_snap_install.assert_not_called()
+
+        assert "Package manager 'apt' not available" in caplog.text
+        assert "Package manager 'snap' not available" in caplog.text
+
+    @pytest.mark.parametrize(
+        "distro,pkg_list,apt_available,apt_failed,snap_failed,total_failed",
+        [
+            pytest.param(
+                "debian",
+                ["pkg1", {"apt": ["pkg2"], "snap": ["pkg3"]}],
+                False,
+                [],
+                ["pkg1", "pkg3"],
+                ["pkg1", "pkg2", "pkg3"],
+                id="debian_no_apt",
+            ),
+            pytest.param(
+                "debian",
+                ["pkg1", {"apt": ["pkg2"], "snap": ["pkg3"]}],
+                True,
+                ["pkg2"],
+                ["pkg3"],
+                ["pkg2", "pkg3"],
+                id="debian_with_apt",
+            ),
+            pytest.param(
+                "ubuntu",
+                ["pkg1", {"apt": ["pkg2"], "snap": ["pkg3"]}],
+                False,
+                [],
+                [],
+                ["pkg2"],
+                id="ubuntu_no_apt",
+            ),
+            pytest.param(
+                "ubuntu",
+                ["pkg1", {"apt": ["pkg2"], "snap": ["pkg3"]}],
+                True,
+                ["pkg1"],
+                ["pkg3"],
+                ["pkg3"],
+                id="ubuntu_with_apt",
+            ),
+        ],
+    )
+    def test_failed(
+        self,
+        distro,
+        pkg_list,
+        apt_available,
+        apt_failed,
+        snap_failed,
+        total_failed,
+        mocker,
+        m_apt_install,
+        m_snap_install,
+    ):
+        """Test that failed packages are properly tracked.
+
+        We need to ensure that the failed packages are properly tracked:
+            1. When package install fails normally
+            2. When package manager is not available
+            3. When package manager is not explicitly supported by the distro
+
+        So test various combinations of these scenarios.
+        """
+        mocker.patch(M_PATH + "apt.Apt.available", return_value=apt_available)
+        mocker.patch(
+            M_PATH + "apt.Apt.install_packages",
+            return_value=apt_failed,
+        )
+        mocker.patch(
+            M_PATH + "snap.Snap.install_packages",
+            return_value=snap_failed,
+        )
+        with pytest.raises(PackageInstallerError) as exc:
+            _get_distro(distro).install_packages(pkg_list)
+        message = exc.value.args[0]
+        assert "Failed to install the following packages" in message
+        for pkg in total_failed:
+            assert pkg in message

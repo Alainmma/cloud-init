@@ -2,8 +2,8 @@
 
 """Ubuntu Drivers: Interact with third party drivers in Ubuntu."""
 
+import logging
 import os
-from textwrap import dedent
 
 from cloudinit.cloud import Cloud
 from cloudinit.distros import Distro
@@ -16,42 +16,20 @@ except ImportError:
     debconf = None
     HAS_DEBCONF = False
 
-from logging import Logger
 
-from cloudinit import log as logging
 from cloudinit import subp, temp_utils, type_utils, util
 from cloudinit.config import Config
-from cloudinit.config.schema import MetaSchema, get_meta_doc
+from cloudinit.config.schema import MetaSchema
 from cloudinit.settings import PER_INSTANCE
 
 LOG = logging.getLogger(__name__)
 
-distros = ["ubuntu"]
-
 meta: MetaSchema = {
     "id": "cc_ubuntu_drivers",
-    "name": "Ubuntu Drivers",
-    "title": "Interact with third party drivers in Ubuntu.",
-    "description": dedent(
-        """\
-        This module interacts with the 'ubuntu-drivers' command to install
-        third party driver packages."""
-    ),
-    "distros": distros,
-    "examples": [
-        dedent(
-            """\
-        drivers:
-          nvidia:
-            license-accepted: true
-        """
-        )
-    ],
+    "distros": ["ubuntu"],
     "frequency": PER_INSTANCE,
     "activate_by_schema_keys": ["drivers"],
 }
-
-__doc__ = get_meta_doc(meta)
 
 OLD_UBUNTU_DRIVERS_STDERR_NEEDLE = (
     "ubuntu-drivers: error: argument <command>: invalid choice: 'install'"
@@ -140,14 +118,12 @@ def install_drivers(cfg, pkg_install_func, distro: Distro):
         raise
 
 
-def handle(
-    name: str, cfg: Config, cloud: Cloud, log: Logger, args: list
-) -> None:
+def handle(name: str, cfg: Config, cloud: Cloud, args: list) -> None:
     if "drivers" not in cfg:
-        log.debug("Skipping module named %s, no 'drivers' key in config", name)
+        LOG.debug("Skipping module named %s, no 'drivers' key in config", name)
         return
     if not HAS_DEBCONF:
-        log.warning(
+        LOG.warning(
             "Skipping module named %s, 'python3-debconf' is not installed",
             name,
         )

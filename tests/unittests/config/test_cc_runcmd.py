@@ -14,6 +14,7 @@ from cloudinit.config.schema import (
     validate_cloudconfig_schema,
 )
 from tests.unittests.helpers import (
+    SCHEMA_EMPTY_ERROR,
     FilesystemMockingTestCase,
     skipUnlessJsonSchema,
 )
@@ -37,7 +38,7 @@ class TestRuncmd(FilesystemMockingTestCase):
         """When the provided config doesn't contain runcmd, skip it."""
         cfg = {}
         mycloud = get_cloud(paths=self.paths)
-        handle("notimportant", cfg, mycloud, LOG, None)
+        handle("notimportant", cfg, mycloud, None)
         self.assertIn(
             "Skipping module named notimportant, no 'runcmd' key",
             self.logs.getvalue(),
@@ -51,7 +52,7 @@ class TestRuncmd(FilesystemMockingTestCase):
         cc = get_cloud(paths=self.paths)
         with self.assertRaises(TypeError) as cm:
             with self.allow_subp(["/bin/sh"]):
-                handle("cc_runcmd", valid_config, cc, LOG, None)
+                handle("cc_runcmd", valid_config, cc, None)
         self.assertIn("Failed to shellify", str(cm.exception))
 
     def test_handler_invalid_command_set(self):
@@ -59,7 +60,7 @@ class TestRuncmd(FilesystemMockingTestCase):
         invalid_config = {"runcmd": 1}
         cc = get_cloud(paths=self.paths)
         with self.assertRaises(TypeError) as cm:
-            handle("cc_runcmd", invalid_config, cc, LOG, [])
+            handle("cc_runcmd", invalid_config, cc, [])
         self.assertIn(
             "Failed to shellify 1 into file"
             " /var/lib/cloud/instances/iid-datasource-none/scripts/runcmd",
@@ -70,12 +71,14 @@ class TestRuncmd(FilesystemMockingTestCase):
         """Valid runcmd schema is written to a runcmd shell script."""
         valid_config = {"runcmd": [["ls", "/"]]}
         cc = get_cloud(paths=self.paths)
-        handle("cc_runcmd", valid_config, cc, LOG, [])
+        handle("cc_runcmd", valid_config, cc, [])
         runcmd_file = os.path.join(
             self.new_root,
             "var/lib/cloud/instances/iid-datasource-none/scripts/runcmd",
         )
-        self.assertEqual("#!/bin/sh\n'ls' '/'\n", util.load_file(runcmd_file))
+        self.assertEqual(
+            "#!/bin/sh\n'ls' '/'\n", util.load_text_file(runcmd_file)
+        )
         file_stat = os.stat(runcmd_file)
         self.assertEqual(0o700, stat.S_IMODE(file_stat.st_mode))
 
@@ -90,7 +93,7 @@ class TestRunCmdSchema:
             ({"runcmd": ["echo bye", "echo bye"]}, None),
             # Invalid schemas
             ({"runcmd": 1}, "1 is not of type 'array'"),
-            ({"runcmd": []}, r"runcmd: \[\] is too short"),
+            ({"runcmd": []}, rf"runcmd: \[\] {SCHEMA_EMPTY_ERROR}"),
             (
                 {
                     "runcmd": [
@@ -111,6 +114,3 @@ class TestRunCmdSchema:
         else:
             with pytest.raises(SchemaValidationError, match=error_msg):
                 validate_cloudconfig_schema(config, get_schema(), strict=True)
-
-
-# vi: ts=4 expandtab

@@ -1,6 +1,6 @@
 # Cloud-Init DataSource for VMware
 #
-# Copyright (c) 2018-2022 VMware, Inc. All Rights Reserved.
+# Copyright (c) 2018-2023 VMware, Inc. All Rights Reserved.
 #
 # Authors: Anish Swaminathan <anishs@vmware.com>
 #          Andrew Kutz <akutz@vmware.com>
@@ -16,66 +16,19 @@ multiple transports types, including:
     * EnvVars
     * GuestInfo
     * IMC (Guest Customization)
-
-Netifaces (https://github.com/al45tair/netifaces)
-
-    Please note this module relies on the netifaces project to introspect the
-    runtime, network configuration of the host on which this datasource is
-    running. This is in contrast to the rest of cloud-init which uses the
-    cloudinit/netinfo module.
-
-    The reasons for using netifaces include:
-
-        * Netifaces is built in C and is more portable across multiple systems
-          and more deterministic than shell exec'ing local network commands and
-          parsing their output.
-
-        * Netifaces provides a stable way to determine the view of the host's
-          network after DHCP has brought the network online. Unlike most other
-          datasources, this datasource still provides support for JINJA queries
-          based on networking information even when the network is based on a
-          DHCP lease. While this does not tie this datasource directly to
-          netifaces, it does mean the ability to consistently obtain the
-          correct information is paramount.
-
-        * It is currently possible to execute this datasource on macOS
-          (which many developers use today) to print the output of the
-          get_host_info function. This function calls netifaces to obtain
-          the same runtime network configuration that the datasource would
-          persist to the local system's instance data.
-
-          However, the netinfo module fails on macOS. The result is either a
-          hung operation that requires a SIGINT to return control to the user,
-          or, if brew is used to install iproute2mac, the ip commands are used
-          but produce output the netinfo module is unable to parse.
-
-          While macOS is not a target of cloud-init, this feature is quite
-          useful when working on this datasource.
-
-          For more information about this behavior, please see the following
-          PR comment, https://bit.ly/3fG7OVh.
-
-    The authors of this datasource are not opposed to moving away from
-    netifaces. The goal may be to eventually do just that. This proviso was
-    added to the top of this module as a way to remind future-us and others
-    why netifaces was used in the first place in order to either smooth the
-    transition away from netifaces or embrace it further up the cloud-init
-    stack.
 """
 
 import collections
 import copy
 import ipaddress
 import json
+import logging
 import os
 import socket
 import time
 
-import netifaces
-
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import net, sources, util
+from cloudinit import atomic_helper, dmi, net, netinfo, sources, util
+from cloudinit.log import loggers
 from cloudinit.sources.helpers.vmware.imc import guestcust_util
 from cloudinit.subp import ProcessExecutionError, subp, which
 
@@ -89,7 +42,6 @@ DATA_ACCESS_METHOD_ENVVAR = "envvar"
 DATA_ACCESS_METHOD_GUESTINFO = "guestinfo"
 DATA_ACCESS_METHOD_IMC = "imc"
 
-VMWARE_RPCTOOL = which("vmware-rpctool")
 REDACT = "redact"
 CLEANUP_GUESTINFO = "cleanup-guestinfo"
 VMX_GUESTINFO = "VMX_GUESTINFO"
@@ -131,7 +83,7 @@ class DataSourceVMware(sources.DataSource):
             For CloudinitPrep customization, Network config Version 2 data
             is parsed from the customization specification.
 
-        envvar and guestinfo tranports:
+        envvar and guestinfo transports:
             Network Config Version 2 data is supported as long as the Linux
             distro's cloud-init package is new enough to parse the data.
             The metadata key "network.encoding" may be used to indicate the
@@ -146,7 +98,8 @@ class DataSourceVMware(sources.DataSource):
 
         self.cfg = {}
         self.data_access_method = None
-        self.vmware_rpctool = VMWARE_RPCTOOL
+        self.rpctool = None
+        self.rpctool_fn = None
 
         # A list includes all possible data transports, each tuple represents
         # one data transport type. This datasource will try to get data from
@@ -160,6 +113,32 @@ class DataSourceVMware(sources.DataSource):
             (DATA_ACCESS_METHOD_GUESTINFO, self.get_guestinfo_data_fn, True),
             (DATA_ACCESS_METHOD_IMC, self.get_imc_data_fn, True),
         ]
+
+    def _unpickle(self, ci_pkl_version: int) -> None:
+        super()._unpickle(ci_pkl_version)
+        for attr in ("rpctool", "rpctool_fn"):
+            if not hasattr(self, attr):
+                setattr(self, attr, None)
+        if not hasattr(self, "cfg"):
+            setattr(self, "cfg", {})
+        if not hasattr(self, "possible_data_access_method_list"):
+            setattr(
+                self,
+                "possible_data_access_method_list",
+                [
+                    (
+                        DATA_ACCESS_METHOD_ENVVAR,
+                        self.get_envvar_data_fn,
+                        False,
+                    ),
+                    (
+                        DATA_ACCESS_METHOD_GUESTINFO,
+                        self.get_guestinfo_data_fn,
+                        True,
+                    ),
+                    (DATA_ACCESS_METHOD_IMC, self.get_imc_data_fn, True),
+                ],
+            )
 
     def __str__(self):
         root = sources.DataSource.__str__(self)
@@ -198,7 +177,7 @@ class DataSourceVMware(sources.DataSource):
                 break
 
         if not self.data_access_method:
-            LOG.error("failed to find a valid data access method")
+            LOG.debug("failed to find a valid data access method")
             return False
 
         LOG.info("using data access method %s", self._get_subplatform())
@@ -237,7 +216,7 @@ class DataSourceVMware(sources.DataSource):
 
         # Reflect any possible local IPv4 or IPv6 addresses in the guest
         # info.
-        advertise_local_ip_addrs(host_info)
+        advertise_local_ip_addrs(host_info, self.rpctool, self.rpctool_fn)
 
         # Ensure the metadata gets updated with information about the
         # host, including the network interfaces, default IP addresses,
@@ -288,9 +267,22 @@ class DataSourceVMware(sources.DataSource):
         # read the file /sys/class/dmi/id/product_uuid for the instance ID.
         if self.metadata and "instance-id" in self.metadata:
             return self.metadata["instance-id"]
-        with open(PRODUCT_UUID_FILE_PATH, "r") as id_file:
-            self.metadata["instance-id"] = str(id_file.read()).rstrip().lower()
-            return self.metadata["instance-id"]
+        self.metadata["instance-id"] = (
+            util.load_text_file(PRODUCT_UUID_FILE_PATH).rstrip().lower()
+        )
+        return self.metadata["instance-id"]
+
+    def check_if_fallback_is_allowed(self):
+        if (
+            self.data_access_method
+            and self.data_access_method == DATA_ACCESS_METHOD_IMC
+            and is_vmware_platform()
+        ):
+            LOG.debug(
+                "Cache fallback is allowed for : %s", self._get_subplatform()
+            )
+            return True
+        return False
 
     def get_public_ssh_keys(self):
         for key_name in (
@@ -313,7 +305,9 @@ class DataSourceVMware(sources.DataSource):
             keys_to_redact = self.metadata[CLEANUP_GUESTINFO]
 
         if self.data_access_method == DATA_ACCESS_METHOD_GUESTINFO:
-            guestinfo_redact_keys(keys_to_redact, self.vmware_rpctool)
+            guestinfo_redact_keys(
+                keys_to_redact, self.rpctool, self.rpctool_fn
+            )
 
     def get_envvar_data_fn(self):
         """
@@ -331,13 +325,77 @@ class DataSourceVMware(sources.DataSource):
         """
         check to see if there is data via the guestinfo transport
         """
-        md, ud, vd = None, None, None
-        if self.vmware_rpctool:
-            md = guestinfo("metadata", self.vmware_rpctool)
-            ud = guestinfo("userdata", self.vmware_rpctool)
-            vd = guestinfo("vendordata", self.vmware_rpctool)
 
-        return (md, ud, vd)
+        vmtoolsd = which("vmtoolsd")
+        vmware_rpctool = which("vmware-rpctool")
+
+        # Default to using vmware-rpctool if it is available.
+        if vmware_rpctool:
+            self.rpctool = vmware_rpctool
+            self.rpctool_fn = exec_vmware_rpctool
+            LOG.debug("discovered vmware-rpctool: %s", vmware_rpctool)
+
+        if vmtoolsd:
+            # Default to using vmtoolsd if it is available and vmware-rpctool
+            # is not.
+            if not vmware_rpctool:
+                self.rpctool = vmtoolsd
+                self.rpctool_fn = exec_vmtoolsd
+            LOG.debug("discovered vmtoolsd: %s", vmtoolsd)
+
+        # If neither vmware-rpctool nor vmtoolsd are available, then nothing
+        # can be done.
+        if not self.rpctool:
+            LOG.debug("no rpctool discovered")
+            return (None, None, None)
+
+        def query_guestinfo(rpctool, rpctool_fn):
+            md, ud, vd = None, None, None
+            LOG.info("query guestinfo with %s", rpctool)
+            md = guestinfo("metadata", rpctool, rpctool_fn)
+            ud = guestinfo("userdata", rpctool, rpctool_fn)
+            vd = guestinfo("vendordata", rpctool, rpctool_fn)
+            return md, ud, vd
+
+        try:
+            # The first attempt to query guestinfo could occur via either
+            # vmware-rpctool *or* vmtoolsd.
+            return query_guestinfo(self.rpctool, self.rpctool_fn)
+        except Exception as error:
+            util.logexc(
+                LOG,
+                "Failed to query guestinfo with %s: %s",
+                self.rpctool,
+                error,
+            )
+
+            # The second attempt to query guestinfo can only occur with
+            # vmtoolsd.
+
+            # If the first attempt at getting the data was with vmtoolsd, then
+            # no second attempt is made.
+            if vmtoolsd and self.rpctool == vmtoolsd:
+                return (None, None, None)
+
+            if not vmtoolsd:
+                LOG.info("vmtoolsd fallback option not present")
+                return (None, None, None)
+
+            LOG.info("fallback to vmtoolsd")
+            self.rpctool = vmtoolsd
+            self.rpctool_fn = exec_vmtoolsd
+
+            try:
+                return query_guestinfo(self.rpctool, self.rpctool_fn)
+            except Exception:
+                util.logexc(
+                    LOG,
+                    "Failed to query guestinfo with %s: %s",
+                    self.rpctool,
+                    error,
+                )
+
+                return (None, None, None)
 
     def get_imc_data_fn(self):
         """
@@ -418,10 +476,10 @@ def decode(key, enc_type, data):
     raw_data = None
     if enc_type in ["gzip+base64", "gz+b64"]:
         LOG.debug("Decoding %s format %s", enc_type, key)
-        raw_data = util.decomp_gzip(util.b64d(data))
+        raw_data = util.decomp_gzip(atomic_helper.b64d(data))
     elif enc_type in ["base64", "b64"]:
         LOG.debug("Decoding %s format %s", enc_type, key)
-        raw_data = util.b64d(data)
+        raw_data = atomic_helper.b64d(data)
     else:
         LOG.debug("Plain-text data %s", key)
         raw_data = data
@@ -442,30 +500,30 @@ def get_none_if_empty_val(val):
     # simplify the rest of this function's logic.
     val = util.decode_binary(val)
     val = val.rstrip()
-    if len(val) == 0 or val == GUESTINFO_EMPTY_YAML_VAL:
+    if (not val) or (val == GUESTINFO_EMPTY_YAML_VAL):
         return None
     return val
 
 
-def advertise_local_ip_addrs(host_info):
+def advertise_local_ip_addrs(host_info, rpctool, rpctool_fn):
     """
     advertise_local_ip_addrs gets the local IP address information from
     the provided host_info map and sets the addresses in the guestinfo
     namespace
     """
-    if not host_info:
+    if not host_info or not rpctool or not rpctool_fn:
         return
 
     # Reflect any possible local IPv4 or IPv6 addresses in the guest
     # info.
     local_ipv4 = host_info.get(LOCAL_IPV4)
     if local_ipv4:
-        guestinfo_set_value(LOCAL_IPV4, local_ipv4)
+        guestinfo_set_value(LOCAL_IPV4, local_ipv4, rpctool, rpctool_fn)
         LOG.info("advertised local ipv4 address %s in guestinfo", local_ipv4)
 
     local_ipv6 = host_info.get(LOCAL_IPV6)
     if local_ipv6:
-        guestinfo_set_value(LOCAL_IPV6, local_ipv6)
+        guestinfo_set_value(LOCAL_IPV6, local_ipv6, rpctool, rpctool_fn)
         LOG.info("advertised local ipv6 address %s in guestinfo", local_ipv6)
 
 
@@ -507,30 +565,37 @@ def guestinfo_envvar_get_value(key):
     return handle_returned_guestinfo_val(key, os.environ.get(env_key, ""))
 
 
-def guestinfo(key, vmware_rpctool=VMWARE_RPCTOOL):
+def exec_vmware_rpctool(rpctool, arg):
+    (stdout, stderr) = subp([rpctool, arg])
+    return (stdout, stderr)
+
+
+def exec_vmtoolsd(rpctool, arg):
+    (stdout, stderr) = subp([rpctool, "--cmd", arg])
+    return (stdout, stderr)
+
+
+def guestinfo(key, rpctool, rpctool_fn):
     """
     guestinfo returns the guestinfo value for the provided key, decoding
     the value when required
     """
-    val = guestinfo_get_value(key, vmware_rpctool)
+    val = guestinfo_get_value(key, rpctool, rpctool_fn)
     if not val:
         return None
-    enc_type = guestinfo_get_value(key + ".encoding", vmware_rpctool)
+    enc_type = guestinfo_get_value(key + ".encoding", rpctool, rpctool_fn)
     return decode(get_guestinfo_key_name(key), enc_type, val)
 
 
-def guestinfo_get_value(key, vmware_rpctool=VMWARE_RPCTOOL):
+def guestinfo_get_value(key, rpctool, rpctool_fn):
     """
     Returns a guestinfo value for the specified key.
     """
     LOG.debug("Getting guestinfo value for key %s", key)
 
     try:
-        (stdout, stderr) = subp(
-            [
-                vmware_rpctool,
-                "info-get " + get_guestinfo_key_name(key),
-            ]
+        (stdout, stderr) = rpctool_fn(
+            rpctool, "info-get " + get_guestinfo_key_name(key)
         )
         if stderr == NOVAL:
             LOG.debug("No value found for key %s", key)
@@ -538,27 +603,35 @@ def guestinfo_get_value(key, vmware_rpctool=VMWARE_RPCTOOL):
             LOG.error("Failed to get guestinfo value for key %s", key)
         return handle_returned_guestinfo_val(key, stdout)
     except ProcessExecutionError as error:
+        # No matter the tool used to access the data, if NOVAL was returned on
+        # stderr, do not raise an exception.
         if error.stderr == NOVAL:
             LOG.debug("No value found for key %s", key)
         else:
+            # Any other result gets logged as an error, and if the tool was
+            # vmware-rpctool, then raise the exception so the caller can try
+            # again with vmtoolsd.
             util.logexc(
                 LOG,
                 "Failed to get guestinfo value for key %s: %s",
                 key,
                 error,
             )
-    except Exception:
+            raise error
+    except Exception as error:
         util.logexc(
             LOG,
             "Unexpected error while trying to get "
-            + "guestinfo value for key %s",
+            "guestinfo value for key %s: %s",
             key,
+            error,
         )
+        raise error
 
     return None
 
 
-def guestinfo_set_value(key, value, vmware_rpctool=VMWARE_RPCTOOL):
+def guestinfo_set_value(key, value, rpctool, rpctool_fn):
     """
     Sets a guestinfo value for the specified key. Set value to an empty string
     to clear an existing guestinfo key.
@@ -574,14 +647,14 @@ def guestinfo_set_value(key, value, vmware_rpctool=VMWARE_RPCTOOL):
     LOG.debug("Setting guestinfo key=%s to value=%s", key, value)
 
     try:
-        subp(
-            [
-                vmware_rpctool,
-                "info-set %s %s" % (get_guestinfo_key_name(key), value),
-            ]
+        rpctool_fn(
+            rpctool, "info-set %s %s" % (get_guestinfo_key_name(key), value)
         )
         return True
     except ProcessExecutionError as error:
+        # Any error result gets logged as an error, and if the tool was
+        # vmware-rpctool, then raise the exception so the caller can try
+        # again with vmtoolsd.
         util.logexc(
             LOG,
             "Failed to set guestinfo key=%s to value=%s: %s",
@@ -593,7 +666,7 @@ def guestinfo_set_value(key, value, vmware_rpctool=VMWARE_RPCTOOL):
         util.logexc(
             LOG,
             "Unexpected error while trying to set "
-            + "guestinfo key=%s to value=%s",
+            "guestinfo key=%s to value=%s",
             key,
             value,
         )
@@ -601,7 +674,7 @@ def guestinfo_set_value(key, value, vmware_rpctool=VMWARE_RPCTOOL):
     return None
 
 
-def guestinfo_redact_keys(keys, vmware_rpctool=VMWARE_RPCTOOL):
+def guestinfo_redact_keys(keys, rpctool, rpctool_fn):
     """
     guestinfo_redact_keys redacts guestinfo of all of the keys in the given
     list. each key will have its value set to "---". Since the value is valid
@@ -609,17 +682,17 @@ def guestinfo_redact_keys(keys, vmware_rpctool=VMWARE_RPCTOOL):
     """
     if not keys:
         return
-    if not type(keys) in (list, tuple):
+    if type(keys) not in (list, tuple):
         keys = [keys]
     for key in keys:
         key_name = get_guestinfo_key_name(key)
         LOG.info("clearing %s", key_name)
         if not guestinfo_set_value(
-            key, GUESTINFO_EMPTY_YAML_VAL, vmware_rpctool
+            key, GUESTINFO_EMPTY_YAML_VAL, rpctool, rpctool_fn
         ):
             LOG.error("failed to clear %s", key_name)
         LOG.info("clearing %s.encoding", key_name)
-        if not guestinfo_set_value(key + ".encoding", "", vmware_rpctool):
+        if not guestinfo_set_value(key + ".encoding", "", rpctool, rpctool_fn):
             LOG.error("failed to clear %s.encoding", key_name)
 
 
@@ -696,89 +769,62 @@ def get_default_ip_addrs():
     addresses associated with the device used by the default route for a given
     address.
     """
-    # TODO(promote and use netifaces in cloudinit.net* modules)
-    gateways = netifaces.gateways()
-    if "default" not in gateways:
-        return None, None
 
-    default_gw = gateways["default"]
-    if (
-        netifaces.AF_INET not in default_gw
-        and netifaces.AF_INET6 not in default_gw
-    ):
-        return None, None
+    # Get ipv4 and ipv6 interfaces associated with default routes
+    ipv4_if = None
+    ipv6_if = None
+    routes = netinfo.route_info()
+    for route in routes["ipv4"]:
+        if route["destination"] == "0.0.0.0":
+            ipv4_if = route["iface"]
+            break
+    for route in routes["ipv6"]:
+        if route["destination"] == "::/0":
+            ipv6_if = route["iface"]
+            break
 
+    # Get ip address associated with default interface
     ipv4 = None
     ipv6 = None
-
-    gw4 = default_gw.get(netifaces.AF_INET)
-    if gw4:
-        _, dev4 = gw4
-        addr4_fams = netifaces.ifaddresses(dev4)
-        if addr4_fams:
-            af_inet4 = addr4_fams.get(netifaces.AF_INET)
-            if af_inet4:
-                if len(af_inet4) > 1:
-                    LOG.warning(
-                        "device %s has more than one ipv4 address: %s",
-                        dev4,
-                        af_inet4,
-                    )
-                elif "addr" in af_inet4[0]:
-                    ipv4 = af_inet4[0]["addr"]
-
-    # Try to get the default IPv6 address by first seeing if there is a default
-    # IPv6 route.
-    gw6 = default_gw.get(netifaces.AF_INET6)
-    if gw6:
-        _, dev6 = gw6
-        addr6_fams = netifaces.ifaddresses(dev6)
-        if addr6_fams:
-            af_inet6 = addr6_fams.get(netifaces.AF_INET6)
-            if af_inet6:
-                if len(af_inet6) > 1:
-                    LOG.warning(
-                        "device %s has more than one ipv6 address: %s",
-                        dev6,
-                        af_inet6,
-                    )
-                elif "addr" in af_inet6[0]:
-                    ipv6 = af_inet6[0]["addr"]
+    netdev = netinfo.netdev_info()
+    if ipv4_if in netdev:
+        addrs = netdev[ipv4_if]["ipv4"]
+        if len(addrs) > 1:
+            LOG.debug(
+                "device %s has more than one ipv4 address: %s", ipv4_if, addrs
+            )
+        elif len(addrs) == 1 and "ip" in addrs[0]:
+            ipv4 = addrs[0]["ip"]
+    if ipv6_if in netdev:
+        addrs = netdev[ipv6_if]["ipv6"]
+        if len(addrs) > 1:
+            LOG.debug(
+                "device %s has more than one ipv6 address: %s", ipv6_if, addrs
+            )
+        elif len(addrs) == 1 and "ip" in addrs[0]:
+            ipv6 = addrs[0]["ip"]
 
     # If there is a default IPv4 address but not IPv6, then see if there is a
     # single IPv6 address associated with the same device associated with the
     # default IPv4 address.
-    if ipv4 and not ipv6:
-        af_inet6 = addr4_fams.get(netifaces.AF_INET6)
-        if af_inet6:
-            if len(af_inet6) > 1:
-                LOG.warning(
-                    "device %s has more than one ipv6 address: %s",
-                    dev4,
-                    af_inet6,
-                )
-            elif "addr" in af_inet6[0]:
-                ipv6 = af_inet6[0]["addr"]
+    if ipv4 is not None and ipv6 is None:
+        for dev_name in netdev:
+            for addr in netdev[dev_name]["ipv4"]:
+                if addr["ip"] == ipv4 and len(netdev[dev_name]["ipv6"]) == 1:
+                    ipv6 = netdev[dev_name]["ipv6"][0]["ip"]
+                    break
 
     # If there is a default IPv6 address but not IPv4, then see if there is a
     # single IPv4 address associated with the same device associated with the
     # default IPv6 address.
-    if not ipv4 and ipv6:
-        af_inet4 = addr6_fams.get(netifaces.AF_INET)
-        if af_inet4:
-            if len(af_inet4) > 1:
-                LOG.warning(
-                    "device %s has more than one ipv4 address: %s",
-                    dev6,
-                    af_inet4,
-                )
-            elif "addr" in af_inet4[0]:
-                ipv4 = af_inet4[0]["addr"]
+    if ipv4 is None and ipv6 is not None:
+        for dev_name in netdev:
+            for addr in netdev[dev_name]["ipv6"]:
+                if addr["ip"] == ipv6 and len(netdev[dev_name]["ipv4"]) == 1:
+                    ipv4 = netdev[dev_name]["ipv4"][0]["ip"]
+                    break
 
     return ipv4, ipv6
-
-
-# patched socket.getfqdn() - see https://bugs.python.org/issue5004
 
 
 def getfqdn(name=""):
@@ -815,11 +861,63 @@ def is_valid_ip_addr(val):
     )
 
 
+def convert_to_netifaces_ipv4_format(addr: dict) -> dict:
+    """
+    Takes a cloudinit.netinfo formatted address and converts to netifaces
+    format, since this module was originally written with netifaces as the
+    network introspection module.
+    netifaces ipv4 format:
+    {
+      "broadcast": "10.15.255.255",
+      "netmask": "255.240.0.0",
+      "addr": "10.0.1.4"
+    }
+    cloudinit.netinfo ipv4 format:
+    {
+      "ip": "10.0.1.4",
+      "mask": "255.240.0.0",
+      "bcast": "10.15.255.255",
+      "scope": "global",
+    }
+    """
+    if not addr.get("ip"):
+        return {}
+    return {
+        "broadcast": addr.get("bcast"),
+        "netmask": addr.get("mask"),
+        "addr": addr.get("ip"),
+    }
+
+
+def convert_to_netifaces_ipv6_format(addr: dict) -> dict:
+    """
+    Takes a cloudinit.netinfo formatted address and converts to netifaces
+    format, since this module was originally written with netifaces as the
+    network introspection module.
+    netifaces ipv6 format:
+    {
+      "netmask": "ffff:ffff:ffff:ffff::/64",
+      "addr": "2001:db8:abcd:1234::1"
+    }
+    cloudinit.netinfo ipv6 format:
+    {
+      "ip": "2001:db8:abcd:1234::1/64",
+      "scope6": "global",
+    }
+    """
+    if not addr.get("ip"):
+        return {}
+    ipv6 = ipaddress.IPv6Interface(addr.get("ip"))
+    return {
+        "netmask": f"{ipv6.netmask}/{ipv6.network.prefixlen}",
+        "addr": str(ipv6.ip),
+    }
+
+
 def get_host_info():
     """
     Returns host information such as the host name and network interfaces.
     """
-    # TODO(look to promote netifices use up in cloud-init netinfo funcs)
     host_info = {
         "network": {
             "interfaces": {
@@ -845,16 +943,16 @@ def get_host_info():
     by_ipv4 = host_info["network"]["interfaces"]["by-ipv4"]
     by_ipv6 = host_info["network"]["interfaces"]["by-ipv6"]
 
-    ifaces = netifaces.interfaces()
+    ifaces = netinfo.netdev_info()
     for dev_name in ifaces:
-        addr_fams = netifaces.ifaddresses(dev_name)
-        af_link = addr_fams.get(netifaces.AF_LINK)
-        af_inet4 = addr_fams.get(netifaces.AF_INET)
-        af_inet6 = addr_fams.get(netifaces.AF_INET6)
+        af_inet4 = []
+        af_inet6 = []
+        for addr in ifaces[dev_name]["ipv4"]:
+            af_inet4.append(convert_to_netifaces_ipv4_format(addr))
+        for addr in ifaces[dev_name]["ipv6"]:
+            af_inet6.append(convert_to_netifaces_ipv6_format(addr))
 
-        mac = None
-        if af_link and "addr" in af_link[0]:
-            mac = af_link[0]["addr"]
+        mac = ifaces[dev_name].get("hwaddr")
 
         # Do not bother recording localhost
         if mac == "00:00:00:00:00:00":
@@ -965,7 +1063,7 @@ def main():
     Executed when this file is used as a program.
     """
     try:
-        logging.setupBasicLogging()
+        loggers.setup_basic_logging()
     except Exception:
         pass
     metadata = {
@@ -977,10 +1075,8 @@ def main():
     }
     host_info = wait_on_network(metadata)
     metadata = util.mergemanydict([metadata, host_info])
-    print(util.json_dumps(metadata))
+    print(atomic_helper.json_dumps(metadata))
 
 
 if __name__ == "__main__":
     main()
-
-# vi: ts=4 expandtab

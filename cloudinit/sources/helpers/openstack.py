@@ -10,9 +10,9 @@ import abc
 import base64
 import copy
 import functools
+import logging
 import os
 
-from cloudinit import log as logging
 from cloudinit import net, sources, subp, url_helper, util
 from cloudinit.sources import BrokenMetadata
 from cloudinit.sources.helpers import ec2
@@ -87,7 +87,7 @@ class SourceMixin:
         if not self.ec2_metadata:
             return None
         bdm = self.ec2_metadata.get("block-device-mapping", {})
-        for (ent_name, device) in bdm.items():
+        for ent_name, device in bdm.items():
             if name == ent_name:
                 return device
         return None
@@ -266,7 +266,7 @@ class BaseReader(metaclass=abc.ABCMeta):
             "version": 2,
         }
         data = datafiles(self._find_working_version())
-        for (name, (path, required, translator)) in data.items():
+        for name, (path, required, translator) in data.items():
             path = self._path_join(self.base_path, path)
             data = None
             found = False
@@ -346,7 +346,7 @@ class BaseReader(metaclass=abc.ABCMeta):
         results["ec2-metadata"] = self._read_ec2_metadata()
 
         # Perform some misc. metadata key renames...
-        for (target_key, source_key, is_required) in KEY_COPIES:
+        for target_key, source_key, is_required in KEY_COPIES:
             if is_required and source_key not in metadata:
                 raise BrokenMetadata("No '%s' entry in metadata" % source_key)
             if source_key in metadata:
@@ -364,7 +364,11 @@ class ConfigDriveReader(BaseReader):
         return os.path.join(*components)
 
     def _path_read(self, path, decode=False):
-        return util.load_file(path, decode=decode)
+        return (
+            util.load_text_file(path)
+            if decode
+            else util.load_binary_file(path)
+        )
 
     def _fetch_available_versions(self):
         if self._versions is None:
@@ -404,11 +408,11 @@ class ConfigDriveReader(BaseReader):
             path = self._path_join(self.base_path, name)
             if os.path.exists(path):
                 found[name] = path
-        if len(found) == 0:
+        if not found:
             raise NonReadable("%s: no files found" % (self.base_path))
 
         md = {}
-        for (name, (key, translator, default)) in FILES_V1.items():
+        for name, (key, translator, default) in FILES_V1.items():
             if name in found:
                 path = found[name]
                 try:
@@ -489,10 +493,10 @@ class MetadataReader(BaseReader):
         return self._versions
 
     def _path_read(self, path, decode=False):
-        def should_retry_cb(_request_args, cause):
+        def should_retry_cb(cause):
             try:
                 code = int(cause.code)
-                if code >= 400:
+                if code >= 400 and code not in [408, 429, 500, 502, 503, 504]:
                     return False
             except (TypeError, ValueError):
                 # Older versions of requests didn't have a code.
@@ -548,7 +552,7 @@ def convert_net_json(network_json=None, known_macs=None):
     There are additional fields that are populated in the network_data.json
     from OpenStack that are not relevant to network_config yaml, so we
     enumerate a dictionary of valid keys for network_yaml and apply filtering
-    to drop these superflous keys from the network_config yaml.
+    to drop these superfluous keys from the network_config yaml.
     """
     if network_json is None:
         return None
@@ -574,8 +578,8 @@ def convert_net_json(network_json=None, known_macs=None):
             "scope",
             "dns_nameservers",
             "dns_search",
-            "routes",
         ],
+        "routes": ["network", "destination", "netmask", "gateway", "metric"],
     }
 
     links = network_json.get("links", [])
@@ -616,6 +620,20 @@ def convert_net_json(network_json=None, known_macs=None):
                 (k, v) for k, v in network.items() if k in valid_keys["subnet"]
             )
 
+            # Filter the route entries as they may contain extra elements such
+            # as DNS which are required elsewhere by the cloudinit schema
+            routes = [
+                dict(
+                    (k, v)
+                    for k, v in route.items()
+                    if k in valid_keys["routes"]
+                )
+                for route in network.get("routes", [])
+            ]
+
+            if routes:
+                subnet.update({"routes": routes})
+
             if network["type"] == "ipv4_dhcp":
                 subnet.update({"type": "dhcp4"})
             elif network["type"] == "ipv6_dhcp":
@@ -642,6 +660,25 @@ def convert_net_json(network_json=None, known_macs=None):
                     }
                 )
 
+            # Look for either subnet or network specific DNS servers
+            # and add them as subnet level DNS entries.
+            # Subnet specific nameservers
+            dns_nameservers = [
+                service["address"]
+                for route in network.get("routes", [])
+                for service in route.get("services", [])
+                if service.get("type") == "dns"
+            ]
+            # Network specific nameservers
+            for service in network.get("services", []):
+                if service.get("type") != "dns":
+                    continue
+                if service["address"] in dns_nameservers:
+                    continue
+                dns_nameservers.append(service["address"])
+            if dns_nameservers:
+                subnet["dns_nameservers"] = dns_nameservers
+
             # Enable accept_ra for stateful and legacy ipv6_dhcp types
             if network["type"] in ["ipv6_dhcpv6-stateful", "ipv6_dhcp"]:
                 cfg.update({"accept-ra": True})
@@ -655,12 +692,19 @@ def convert_net_json(network_json=None, known_macs=None):
         if link["type"] in ["bond"]:
             params = {}
             if link_mac_addr:
-                params["mac_address"] = link_mac_addr
+                cfg.update({"mac_address": link_mac_addr})
             for k, v in link.items():
                 if k == "bond_links":
                     continue
                 elif k.startswith("bond"):
-                    params.update({k: v})
+                    # There is a difference in key name formatting for
+                    # bond parameters in the cloudinit and OpenStack
+                    # network schemas. The keys begin with 'bond-' in the
+                    # cloudinit schema but 'bond_' in OpenStack
+                    # network_data.json schema. Translate them to what
+                    # is expected by cloudinit.
+                    translated_key = "bond-{}".format(k.split("bond_", 1)[-1])
+                    params.update({translated_key: v})
 
             # openstack does not provide a name for the bond.
             # they do provide an 'id', but that is possibly non-sensical.
@@ -688,7 +732,6 @@ def convert_net_json(network_json=None, known_macs=None):
                 {
                     "name": name,
                     "vlan_id": link["vlan_id"],
-                    "mac_address": link["vlan_mac_address"],
                 }
             )
             link_updates.append((cfg, "vlan_link", "%s", link["vlan_link"]))
@@ -728,7 +771,11 @@ def convert_net_json(network_json=None, known_macs=None):
             if not mac:
                 raise ValueError("No mac_address or name entry for %s" % d)
             if mac not in known_macs:
-                raise ValueError("Unable to find a system nic for %s" % d)
+                # Let's give udev a chance to catch up
+                util.udevadm_settle()
+                known_macs = net.get_interfaces_by_mac()
+                if mac not in known_macs:
+                    raise ValueError("Unable to find a system nic for %s" % d)
             d["name"] = known_macs[mac]
 
         for cfg, key, fmt, targets in link_updates:
@@ -751,11 +798,8 @@ def convert_net_json(network_json=None, known_macs=None):
                 cfg["type"] = "infiniband"
 
     for service in services:
-        cfg = service
+        cfg = copy.deepcopy(service)
         cfg.update({"type": "nameserver"})
         config.append(cfg)
 
     return {"version": 1, "config": config}
-
-
-# vi: ts=4 expandtab

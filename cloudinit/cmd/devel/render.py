@@ -5,20 +5,22 @@
 """Debug jinja template rendering of user-data."""
 
 import argparse
+import logging
 import os
 import sys
 
-from cloudinit import log
-from cloudinit.cmd.devel import addLogHandlerCLI, read_cfg_paths
+from cloudinit.cmd.devel import read_cfg_paths
 from cloudinit.handlers.jinja_template import (
     JinjaLoadError,
+    JinjaSyntaxParsingException,
     NotJinjaError,
     render_jinja_payload_from_file,
 )
 
 NAME = "render"
+CLOUDINIT_RUN_DIR = read_cfg_paths().run_dir
 
-LOG = log.getLogger(NAME)
+LOG = logging.getLogger(__name__)
 
 
 def get_parser(parser=None):
@@ -39,8 +41,8 @@ def get_parser(parser=None):
         "--instance-data",
         type=str,
         help=(
-            "Optional path to instance-data.json file. Defaults to"
-            " /run/cloud-init/instance-data.json"
+            "Optional path to instance-data.json file. "
+            f"Defaults to {CLOUDINIT_RUN_DIR}"
         ),
     )
     parser.add_argument(
@@ -61,7 +63,6 @@ def render_template(user_data_path, instance_data_path=None, debug=False):
 
     @return 0 on success, 1 on failure.
     """
-    addLogHandlerCLI(LOG, log.DEBUG if debug else log.WARNING)
     if instance_data_path:
         instance_data_fn = instance_data_path
     else:
@@ -98,6 +99,13 @@ def render_template(user_data_path, instance_data_path=None, debug=False):
     except (JinjaLoadError, NotJinjaError) as e:
         LOG.error(
             "Cannot render from instance data due to exception: %s", repr(e)
+        )
+        return 1
+    except JinjaSyntaxParsingException as e:
+        LOG.error(
+            "Failed to render templated user-data file '%s'. %s",
+            user_data_path,
+            str(e),
         )
         return 1
     if not rendered_payload:

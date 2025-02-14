@@ -252,7 +252,9 @@ class TestCmdlineUrl:
         key = "cloud-config-url"
         url = "http://example.com/foo"
         cmdline = "ro %s=%s bar=1" % (key, url)
-        m_read.return_value = url_helper.StringResponse(b"unexpected blob")
+        m_read.return_value = url_helper.StringResponse(
+            b"unexpected blob", "http://example.com/"
+        )
 
         fpath = tmpdir.join("ccfile")
         lvl, msg = main.attempt_cmdline_url(
@@ -288,12 +290,14 @@ class TestCmdlineUrl:
         payload = b"#cloud-config\nmydata: foo\nbar: wark\n"
         cmdline = "ro %s=%s bar=1" % ("cloud-config-url", url)
 
-        m_read.return_value = url_helper.StringResponse(payload)
+        m_read.return_value = url_helper.StringResponse(
+            payload, "http://example.com"
+        )
         fpath = tmpdir.join("ccfile")
         lvl, msg = main.attempt_cmdline_url(
             fpath, network=True, cmdline=cmdline
         )
-        assert util.load_file(fpath, decode=False) == payload
+        assert util.load_binary_file(fpath) == payload
         assert logging.INFO == lvl
         assert url in msg
 
@@ -310,7 +314,7 @@ class TestCmdlineUrl:
         lvl, msg = main.attempt_cmdline_url(
             fpath, network=True, cmdline=cmdline
         )
-        assert util.load_file(fpath, decode=False) == payload
+        assert util.load_binary_file(fpath) == payload
         assert logging.INFO == lvl
         assert url in msg
 
@@ -341,6 +345,3 @@ class TestCmdlineUrl:
         assert logging.WARN == lvl
         assert url in msg
         assert False is os.path.exists(fpath)
-
-
-# vi: ts=4 expandtab

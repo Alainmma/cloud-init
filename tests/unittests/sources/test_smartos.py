@@ -5,6 +5,8 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
+# pylint: disable=attribute-defined-outside-init
+
 """This is a testcase for the SmartOS datasource.
 
 It replicates a serial console and acts like the SmartOS console does in
@@ -26,6 +28,7 @@ from binascii import crc32
 import serial
 
 from cloudinit import helpers as c_helpers
+from cloudinit.atomic_helper import b64e
 from cloudinit.event import EventScope, EventType
 from cloudinit.sources import DataSourceSmartOS
 from cloudinit.sources.DataSourceSmartOS import SERIAL_DEVICE, SMARTOS_ENV_KVM
@@ -37,7 +40,7 @@ from cloudinit.sources.DataSourceSmartOS import (
     identify_file,
 )
 from cloudinit.subp import ProcessExecutionError, subp, which
-from cloudinit.util import b64e, write_file
+from cloudinit.util import write_file
 from tests.unittests.helpers import (
     CiTestCase,
     FilesystemMockingTestCase,
@@ -324,6 +327,30 @@ SDC_NICS_SINGLE_GATEWAY = json.loads(
 """
 )
 
+SDC_NICS_ADDRCONF = json.loads(
+    """
+[
+        {
+          "gateway": "10.64.1.129",
+          "gateways": [
+            "10.64.1.129"
+          ],
+          "interface": "net0",
+          "ip": "10.64.1.130",
+          "ips": [
+            "10.64.1.130/26",
+            "addrconf"
+          ],
+          "mac": "e2:7f:c1:50:eb:99",
+          "model": "virtio",
+          "netmask": "255.255.255.192",
+          "nic_tag": "external",
+          "primary": true,
+          "vlan_id": 20
+        }
+]
+"""
+)
 
 MOCK_RETURNS = {
     "hostname": "test-host",
@@ -1341,6 +1368,29 @@ class TestNetworkConversion(CiTestCase):
         self.maxDiff = None
         self.assertEqual(expected, found)
 
+    def test_ipv6_addrconf(self):
+        expected = {
+            "config": [
+                {
+                    "mac_address": "e2:7f:c1:50:eb:99",
+                    "name": "net0",
+                    "subnets": [
+                        {
+                            "address": "10.64.1.130/26",
+                            "gateway": "10.64.1.129",
+                            "type": "static",
+                        },
+                        {"type": "dhcp6"},
+                    ],
+                    "type": "physical",
+                }
+            ],
+            "version": 1,
+        }
+        found = convert_net(SDC_NICS_ADDRCONF)
+        self.maxDiff = None
+        self.assertEqual(expected, found)
+
 
 @unittest.skipUnless(
     get_smartos_environ() == SMARTOS_ENV_KVM,
@@ -1373,7 +1423,7 @@ class TestSerialConcurrency(CiTestCase):
         # os.kill() rather than mdata_proc.terminate() to avoid console spam.
         os.kill(self.mdata_proc.pid, signal.SIGKILL)
         self.mdata_proc.join()
-        super(TestSerialConcurrency, self).tearDown()
+        super().tearDown()
 
     def start_mdata_loop(self):
         """
@@ -1384,7 +1434,7 @@ class TestSerialConcurrency(CiTestCase):
         are testing to be sure that cloud-init and mdata-get respect each
         others locks.
         """
-        rcs = list(range(0, 256))
+        rcs = list(range(256))
         while True:
             subp(["mdata-get", "sdc:routes"], rcs=rcs)
 
@@ -1401,13 +1451,10 @@ class TestSerialConcurrency(CiTestCase):
         # 10 times at roughly the same time as cloud-init fetched each key
         # once.  cloud-init would regularly see failures before making it
         # through all keys once.
-        for _ in range(0, 3):
+        for _ in range(3):
             for key in keys:
                 # We don't care about the return value, just that it doesn't
                 # thrown any exceptions.
                 client.get(key)
 
         self.assertIsNone(self.mdata_proc.exitcode)
-
-
-# vi: ts=4 expandtab

@@ -4,12 +4,12 @@
 # This file is part of cloud-init. See LICENSE file for license information.
 #
 """Hetzner Cloud API Documentation
-   https://docs.hetzner.cloud/"""
+https://docs.hetzner.cloud/"""
+
+import logging
 
 import cloudinit.sources.helpers.hetzner as hc_helper
-from cloudinit import dmi
-from cloudinit import log as logging
-from cloudinit import net, sources, util
+from cloudinit import dmi, net, sources, util
 from cloudinit.net.dhcp import NoDHCPLeaseError
 from cloudinit.net.ephemeral import EphemeralDHCPv4
 
@@ -48,6 +48,7 @@ class DataSourceHetzner(sources.DataSource):
         self.wait_retry = self.ds_cfg.get("wait_retry", MD_WAIT_RETRY)
         self._network_config = sources.UNSET
         self.dsmode = sources.DSMODE_NETWORK
+        self.metadata_full = None
 
     def _get_data(self):
         (on_hetzner, serial) = get_hcloud_data()
@@ -57,11 +58,13 @@ class DataSourceHetzner(sources.DataSource):
 
         try:
             with EphemeralDHCPv4(
+                self.distro,
                 iface=net.find_fallback_nic(),
-                connectivity_url_data={
-                    "url": BASE_URL_V1 + "/metadata/instance-id",
-                },
-                tmp_dir=self.distro.get_tmp_exec_path(),
+                connectivity_urls_data=[
+                    {
+                        "url": BASE_URL_V1 + "/metadata/instance-id",
+                    }
+                ],
             ):
                 md = hc_helper.read_metadata(
                     self.metadata_address,
@@ -75,7 +78,7 @@ class DataSourceHetzner(sources.DataSource):
                     sec_between=self.wait_retry,
                     retries=self.retries,
                 )
-        except (NoDHCPLeaseError) as e:
+        except NoDHCPLeaseError as e:
             LOG.error("Bailing, DHCP Exception: %s", e)
             raise
 
@@ -86,7 +89,7 @@ class DataSourceHetzner(sources.DataSource):
         # The fallout is that in the event of b64 encoded user-data,
         # /var/lib/cloud-init/cloud-config.txt will not be identical to the
         # user-data provided.  It will be decoded.
-        self.userdata_raw = hc_helper.maybe_b64decode(ud)
+        self.userdata_raw = util.maybe_b64decode(ud)
         self.metadata_full = md
 
         # hostname is name provided by user at launch.  The API enforces it is
@@ -130,7 +133,7 @@ class DataSourceHetzner(sources.DataSource):
 
         _net_config = self.metadata["network-config"]
         if not _net_config:
-            raise Exception("Unable to get meta-data from server....")
+            raise RuntimeError("Unable to get meta-data from server....")
 
         self._network_config = _net_config
 
@@ -160,6 +163,3 @@ datasources = [
 # Return a list of data sources that match this set of dependencies
 def get_datasource_list(depends):
     return sources.list_from_depends(depends, datasources)
-
-
-# vi: ts=4 expandtab

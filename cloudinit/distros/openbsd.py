@@ -2,10 +2,9 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-import os
+import logging
 
 import cloudinit.distros.netbsd
-from cloudinit import log as logging
 from cloudinit import subp, util
 
 LOG = logging.getLogger(__name__)
@@ -15,8 +14,18 @@ class Distro(cloudinit.distros.netbsd.NetBSD):
     hostname_conf_fn = "/etc/myname"
     init_cmd = ["rcctl"]
 
+    # For OpenBSD (from https://man.openbsd.org/passwd.5) a password field
+    # of "" indicates no password, and password field values of either
+    # "*" or "*************" (13 "*") indicate differing forms of "locked"
+    # but with no password defined.
+    shadow_empty_locked_passwd_patterns = [
+        r"^{username}::",
+        r"^{username}:\*:",
+        r"^{username}:\*\*\*\*\*\*\*\*\*\*\*\*\*:",
+    ]
+
     def _read_hostname(self, filename, default=None):
-        return util.load_file(self.hostname_conf_fn)
+        return util.load_text_file(self.hostname_conf_fn)
 
     def _write_hostname(self, hostname, filename):
         content = hostname + "\n"
@@ -25,13 +34,14 @@ class Distro(cloudinit.distros.netbsd.NetBSD):
     def _get_add_member_to_group_cmd(self, member_name, group_name):
         return ["usermod", "-G", group_name, member_name]
 
-    def manage_service(self, action: str, service: str):
+    @classmethod
+    def manage_service(cls, action: str, service: str, *extra_args, rcs=None):
         """
         Perform the requested action on a service. This handles OpenBSD's
         'rcctl'.
         May raise ProcessExecutionError
         """
-        init_cmd = self.init_cmd
+        init_cmd = cls.init_cmd
         cmds = {
             "stop": ["stop", service],
             "start": ["start", service],
@@ -43,7 +53,7 @@ class Distro(cloudinit.distros.netbsd.NetBSD):
             "status": ["check", service],
         }
         cmd = list(init_cmd) + list(cmds[action])
-        return subp.subp(cmd, capture=True)
+        return subp.subp(cmd, capture=True, rcs=rcs)
 
     def lock_passwd(self, name):
         try:
@@ -53,12 +63,12 @@ class Distro(cloudinit.distros.netbsd.NetBSD):
             raise
 
     def unlock_passwd(self, name):
-        pass
+        LOG.debug(
+            "OpenBSD password lock is not reversible, "
+            "ignoring unlock for user %s",
+            name,
+        )
 
     def _get_pkg_cmd_environ(self):
         """Return env vars used in OpenBSD package_command operations"""
-        e = os.environ.copy()
-        return e
-
-
-# vi: ts=4 expandtab
+        return {}

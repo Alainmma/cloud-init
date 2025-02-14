@@ -4,10 +4,9 @@
 #
 # This file is part of cloud-init. See LICENSE file for license information.
 
-import base64
 import datetime
 import json
-import os
+import sys
 import time
 
 from cloudinit import subp, util
@@ -46,9 +45,6 @@ format_key = {
     "%T": "total_time",
 }
 
-formatting_help = " ".join(
-    ["{0}: {1}".format(k.replace("%", "%%"), v) for k, v in format_key.items()]
-)
 SUCCESS_CODE = "successful"
 FAIL_CODE = "failure"
 CONTAINER_CODE = "container"
@@ -64,20 +60,6 @@ def format_record(msg, event):
             else:
                 msg = msg.replace(i, "{%s}" % j)
     return msg.format(**event)
-
-
-def dump_event_files(event):
-    content = dict((k, v) for k, v in event.items() if k not in ["content"])
-    files = content["files"]
-    saved = []
-    for f in files:
-        fname = f["path"]
-        fn_local = os.path.basename(fname)
-        fcontent = base64.b64decode(f["content"]).decode("ascii")
-        util.write_file(fn_local, fcontent)
-        saved.append(fn_local)
-
-    return saved
 
 
 def event_name(event):
@@ -103,7 +85,9 @@ def event_timestamp(event):
 
 
 def event_datetime(event):
-    return datetime.datetime.utcfromtimestamp(event_timestamp(event))
+    return datetime.datetime.fromtimestamp(
+        event_timestamp(event), datetime.timezone.utc
+    )
 
 
 def delta_seconds(t1, t2):
@@ -257,19 +241,6 @@ def gather_timestamps_using_systemd():
         # lxc based containers do not set their monotonic zero point to be when
         # the container starts, instead keep using host boot as zero point
         if util.is_container():
-            # clock.monotonic also uses host boot as zero point
-            base_time = float(time.time()) - float(time.monotonic())
-            # TODO: lxcfs automatically truncates /proc/uptime to seconds
-            # in containers when https://github.com/lxc/lxcfs/issues/292
-            # is fixed, util.uptime() should be used instead of stat on
-            try:
-                file_stat = os.stat("/proc/1/cmdline")
-                kernel_start = file_stat.st_atime
-            except OSError as err:
-                raise RuntimeError(
-                    "Could not determine container boot "
-                    "time from /proc/1/cmdline. ({})".format(err)
-                ) from err
             status = CONTAINER_CODE
         kernel_end = base_time + delta_k_end
         cloudinit_sysd = base_time + delta_ci_s
@@ -285,21 +256,15 @@ def gather_timestamps_using_systemd():
 
 def generate_records(
     events,
-    blame_sort=False,
     print_format="(%n) %d seconds in %I%D",
-    dump_files=False,
-    log_datafiles=False,
 ):
     """
     Take in raw events and create parent-child dependencies between events
     in order to order events in chronological order.
 
     :param events: JSONs from dump that represents events taken from logs
-    :param blame_sort: whether to sort by timestamp or by time taken.
     :param print_format: formatting to represent event, time stamp,
     and time taken by the event in one line
-    :param dump_files: whether to dump files into JSONs
-    :param log_datafiles: whether or not to log events generated
 
     :return: boot records ordered chronologically
     """
@@ -312,7 +277,7 @@ def generate_records(
     boot_records = []
 
     unprocessed = []
-    for e in range(0, len(sorted_events)):
+    for e in range(len(sorted_events)):
         event = events[e]
         try:
             next_evt = events[e + 1]
@@ -385,6 +350,9 @@ def load_events_infile(infile):
     :return: json version of logfile, raw file
     """
     data = infile.read()
+    if not data.strip():
+        sys.stderr.write("Empty file %s\n" % infile.name)
+        sys.exit(1)
     try:
         return json.loads(data), data
     except ValueError:

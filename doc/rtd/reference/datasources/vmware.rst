@@ -11,7 +11,7 @@ vSphere and currently supports the following data transports:
 
 The configuration method is dependent upon the transport.
 
-Guest OS customisation
+Guest OS customization
 ======================
 
 The following configuration can be set for this datasource in ``cloud-init``
@@ -22,56 +22,69 @@ System configuration
 --------------------
 
 * ``disable_vmware_customization``: true (disable) or false (enable) the VMware
-  traditional Linux guest customisation. Traditional Linux guest customisation
-  is customising a Linux virtual machine with a
-  `traditional Linux customisation specification`_. Setting this configuration
+  traditional Linux guest customization. Traditional Linux guest customization
+  is customizing a Linux virtual machine with a
+  `traditional Linux customization specification`_. Setting this configuration
   to false is required to make sure this datasource is found in ``ds-identify``
-  when using Guest OS customisation transport.
+  when using Guest OS customization transport. VMware Tools only checks this
+  configuration in :file:`/etc/cloud/cloud.cfg`.
 
   Default: true
 
 Datasource configuration
 ------------------------
 
-* ``allow_raw_data``: true (enable) or false (disable) the VMware customisation
-  using ``cloud-init`` metadata and user data directly. Since vSphere 7.0
-  Update 3 version, users can create a Linux customisation specification with
-  minimal ``cloud-init`` metadata and user data, and apply this specification
-  to a virtual machine. This datasource will parse the metadata and user data
+* ``allow_raw_data``: true (enable) or false (disable) the VMware customization
+  using ``cloud-init`` meta-data and user-data directly. Since vSphere 7.0
+  Update 3 version, users can create a Linux customization specification with
+  minimal ``cloud-init`` meta-data and user-data, and apply this specification
+  to a virtual machine. This datasource will parse the meta-data and user-data
   and configure the virtual machine with them. See
-  `Guest customisation using cloud-init`_ for more information.
+  `Guest customization using cloud-init`_ for more information.
 
   Default: true
 
 * ``vmware_cust_file_max_wait``: The maximum amount of clock time (in seconds)
-  that should be spent waiting for VMware customisation files.
+  that should be spent waiting for VMware customization files.
 
   Default: 15
 
 Configuration examples
 ----------------------
 
-1. Create the :file:`/etc/cloud/cloud.cfg.d/99-vmware-guest-customization.cfg`
-   file with the following content, which will enable VMware customisation and
-   set the maximum waiting time for the VMware customisation file to 10
-   seconds:
+1. Enable VMware customization and set the maximum waiting time for the
+   VMware customization file to 10 seconds:
+
+   Set ``disable_vmware_customization`` in the :file:`/etc/cloud/cloud.cfg`
 
    .. code-block:: yaml
 
       disable_vmware_customization: false
+
+   Create a :file:`/etc/cloud/cloud.cfg.d/99-vmware-guest-customization.cfg`
+   with the following content
+
+   .. code-block:: yaml
+
       datasource:
         VMware:
           vmware_cust_file_max_wait: 10
 
-2. Create the :file:`/etc/cloud/cloud.cfg.d/99-vmware-guest-customization.cfg`
-   file with the following content, which will enable VMware customisation but
-   will only try to apply a traditional Linux Guest Customisation
-   configuration, and set the maximum waiting time for the VMware
-   customisation file to 10 seconds:
+2. Enable VMware customization but only try to apply a traditional Linux
+   Guest Customization configuration, and set the maximum waiting time for
+   the VMware customization file to 10 seconds:
+
+   Set ``disable_vmware_customization`` in the :file:`/etc/cloud/cloud.cfg`
 
    .. code-block:: yaml
 
       disable_vmware_customization: false
+
+   Create a :file:`/etc/cloud/cloud.cfg.d/99-vmware-guest-customization.cfg`
+   with the following content
+
+   .. code-block:: yaml
+
       datasource:
         VMware:
           allow_raw_data: false
@@ -89,15 +102,15 @@ Tools configuration options with the following command:
     vmware-toolbox-cmd config set <section> <key> <value>
 
 The following VMware Tools configuration option affects this datasource's
-behaviour when applying customisation configuration with custom scripts:
+behaviour when applying customization configuration with custom scripts:
 
 * ``[deploypkg] enable-custom-scripts``: If this option is absent in VMware
   Tools configuration, the custom script is disabled by default for security
   reasons. Some VMware products could change this default behaviour (for
-  example: enabled by default) via customisation of the specification settings.
+  example: enabled by default) via customization of the specification settings.
 
   VMware admins can refer to `customization configuration`_ and set the
-  customisation specification settings.
+  customization specification settings.
 
 For more information, see `VMware vSphere Product Documentation`_ and specific
 VMware Tools configuration options.
@@ -105,8 +118,8 @@ VMware Tools configuration options.
 GuestInfo keys
 ==============
 
-One method of providing meta, user, and vendor data is by setting the following
-key/value pairs on a VM's ``extraConfig`` `property`_:
+One method of providing meta-data, user-data, and vendor-data is by setting the
+following key/value pairs on a VM's ``extraConfig`` `property`_:
 
 .. list-table::
    :header-rows: 1
@@ -114,15 +127,15 @@ key/value pairs on a VM's ``extraConfig`` `property`_:
    * - Property
      - Description
    * - ``guestinfo.metadata``
-     - A YAML or JSON document containing the ``cloud-init`` metadata.
+     - A YAML or JSON document containing the ``cloud-init`` meta-data.
    * - ``guestinfo.metadata.encoding``
      - The encoding type for ``guestinfo.metadata``.
    * - ``guestinfo.userdata``
-     - A YAML document containing the ``cloud-init`` user data.
+     - A YAML document containing the ``cloud-init`` user-data.
    * - ``guestinfo.userdata.encoding``
      - The encoding type for ``guestinfo.userdata``.
    * - ``guestinfo.vendordata``
-     - A YAML document containing the ``cloud-init`` vendor data.
+     - A YAML document containing the ``cloud-init`` vendor-data.
    * - ``guestinfo.vendordata.encoding``
      - The encoding type for ``guestinfo.vendordata``.
 
@@ -135,16 +148,40 @@ Features
 
 This section reviews several features available in this datasource.
 
+Graceful rpctool fallback
+-------------------------
+
+The datasource initially attempts to use the program ``vmware-rpctool`` if it
+is available. However, if the program returns a non-zero exit code, then the
+datasource falls back to using the program ``vmtoolsd`` with the ``--cmd``
+argument.
+
+On some older versions of ESXi and open-vm-tools, the ``vmware-rpctool``
+program is much more performant than ``vmtoolsd``. While this gap was
+closed, it is not reasonable to expect the guest where cloud-init is running to
+know whether the underlying hypervisor has the patch.
+
+Additionally, vSphere VMs may have the following present in their VMX file:
+
+.. code-block:: ini
+
+   guest_rpc.rpci.auth.cmd.info-set = "TRUE"
+   guest_rpc.rpci.auth.cmd.info-get = "TRUE"
+
+The above configuration causes the ``vmware-rpctool`` command to return a
+non-zero exit code with the error message ``Permission denied``. If this should
+occur, the datasource falls back to using ``vmtoolsd``.
+
 Instance data and lazy networks
 -------------------------------
 
 One of the hallmarks of ``cloud-init`` is
 :ref:`its use of instance-data and JINJA queries <instancedata-Using>` -- the
-ability to write queries in user and vendor data that reference runtime
+ability to write queries in user-data and vendor-data that reference runtime
 information present in :file:`/run/cloud-init/instance-data.json`. This works
-well when the metadata provides all of the information up front, such as the
+well when the meta-data provides all of the information up front, such as the
 network configuration. For systems that rely on DHCP, however, this
-information may not be available when the metadata is persisted to disk.
+information may not be available when the meta-data is persisted to disk.
 
 This datasource ensures that even if the instance is using DHCP to configure
 networking, the same details about the configured network are available in
@@ -222,10 +259,10 @@ The above command will result in output similar to the below JSON:
 Redacting sensitive information (GuestInfo keys transport only)
 ---------------------------------------------------------------
 
-Sometimes the ``cloud-init`` user data might contain sensitive information,
+Sometimes the ``cloud-init`` user-data might contain sensitive information,
 and it may be desirable to have the ``guestinfo.userdata`` key (or other
 ``guestinfo`` keys) redacted as soon as its data is read by the datasource.
-This is possible by adding the following to the metadata:
+This is possible by adding the following to the meta-data:
 
 .. code-block:: yaml
 
@@ -233,7 +270,7 @@ This is possible by adding the following to the metadata:
    - userdata
    - vendordata
 
-When the above snippet is added to the metadata, the datasource will iterate
+When the above snippet is added to the meta-data, the datasource will iterate
 over the elements in the ``redact`` array and clear each of the keys. For
 example, when the ``guestinfo`` transport is used, the above snippet will cause
 the following commands to be executed:
@@ -275,8 +312,8 @@ Sometimes ``cloud-init`` may bring up the network, but it will not finish
 coming online before the datasource's ``setup`` function is called, resulting
 in a :file:`/var/run/cloud-init/instance-data.json` file that does not have the
 correct network information. It is possible to instruct the datasource to wait
-until an IPv4 or IPv6 address is available before writing the instance data
-with the following metadata properties:
+until an IPv4 or IPv6 address is available before writing the instance-data
+with the following meta-data properties:
 
 .. code-block:: yaml
 
@@ -294,8 +331,8 @@ Walkthrough of GuestInfo keys transport
 The following series of steps is a demonstration of how to configure a VM with
 this datasource using the GuestInfo keys transport:
 
-#. Create the metadata file for the VM. Save the following YAML to a file named
-   :file:`metadata.yaml`\:
+#. Create the meta-data file for the VM. Save the following YAML to a file named
+   :file:`meta-data.yaml`\:
 
    .. code-block:: yaml
 
@@ -309,7 +346,7 @@ this datasource using the GuestInfo keys transport:
                name: ens*
              dhcp4: yes
 
-#. Create the userdata file :file:`userdata.yaml`\:
+#. Create the user-data file :file:`user-data.yaml`\:
 
    .. code-block:: yaml
 
@@ -318,12 +355,12 @@ this datasource using the GuestInfo keys transport:
        users:
        - default
        - name: akutz
-           primary_group: akutz
-           sudo: ALL=(ALL) NOPASSWD:ALL
-           groups: sudo, wheel
-           lock_passwd: true
-           ssh_authorized_keys:
-           - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDE0c5FczvcGSh/tG4iw+Fhfi/O5/EvUM/96js65tly4++YTXK1d9jcznPS5ruDlbIZ30oveCBd3kT8LLVFwzh6hepYTf0YmCTpF4eDunyqmpCXDvVscQYRXyasEm5olGmVe05RrCJSeSShAeptv4ueIn40kZKOghinGWLDSZG4+FFfgrmcMCpx5YSCtX2gvnEYZJr0czt4rxOZuuP7PkJKgC/mt2PcPjooeX00vAj81jjU2f3XKrjjz2u2+KIt9eba+vOQ6HiC8c2IzRkUAJ5i1atLy8RIbejo23+0P4N2jjk17QySFOVHwPBDTYb0/0M/4ideeU74EN/CgVsvO6JrLsPBR4dojkV5qNbMNxIVv5cUwIy2ThlLgqpNCeFIDLCWNZEFKlEuNeSQ2mPtIO7ETxEL2Cz5y/7AIuildzYMc6wi2bofRC8HmQ7rMXRWdwLKWsR0L7SKjHblIwarxOGqLnUI+k2E71YoP7SZSlxaKi17pqkr0OMCF+kKqvcvHAQuwGqyumTEWOlH6TCx1dSPrW+pVCZSHSJtSTfDW2uzL6y8k10MT06+pVunSrWo5LHAXcS91htHV1M1UrH/tZKSpjYtjMb5+RonfhaFRNzvj7cCE1f3Kp8UVqAdcGBTtReoE8eRUT63qIxjw03a7VwAyB2w+9cu1R9/vAo8SBeRqw== sakutz@gmail.com
+         primary_group: akutz
+         sudo: ALL=(ALL) NOPASSWD:ALL
+         groups: sudo, wheel
+         lock_passwd: true
+         ssh_authorized_keys:
+         - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDE0c5FczvcGSh/tG4iw+Fhfi/O5/EvUM/96js65tly4++YTXK1d9jcznPS5ruDlbIZ30oveCBd3kT8LLVFwzh6hepYTf0YmCTpF4eDunyqmpCXDvVscQYRXyasEm5olGmVe05RrCJSeSShAeptv4ueIn40kZKOghinGWLDSZG4+FFfgrmcMCpx5YSCtX2gvnEYZJr0czt4rxOZuuP7PkJKgC/mt2PcPjooeX00vAj81jjU2f3XKrjjz2u2+KIt9eba+vOQ6HiC8c2IzRkUAJ5i1atLy8RIbejo23+0P4N2jjk17QySFOVHwPBDTYb0/0M/4ideeU74EN/CgVsvO6JrLsPBR4dojkV5qNbMNxIVv5cUwIy2ThlLgqpNCeFIDLCWNZEFKlEuNeSQ2mPtIO7ETxEL2Cz5y/7AIuildzYMc6wi2bofRC8HmQ7rMXRWdwLKWsR0L7SKjHblIwarxOGqLnUI+k2E71YoP7SZSlxaKi17pqkr0OMCF+kKqvcvHAQuwGqyumTEWOlH6TCx1dSPrW+pVCZSHSJtSTfDW2uzL6y8k10MT06+pVunSrWo5LHAXcS91htHV1M1UrH/tZKSpjYtjMb5+RonfhaFRNzvj7cCE1f3Kp8UVqAdcGBTtReoE8eRUT63qIxjw03a7VwAyB2w+9cu1R9/vAo8SBeRqw== sakutz@gmail.com
 
 #. Please note this step requires that the VM be powered off. All of the
    commands below use the VMware CLI tool, `govc`_.
@@ -352,7 +389,7 @@ this datasource using the GuestInfo keys transport:
 
    Otherwise ``cloud-init`` may not run in first-boot mode. For more
    information on how the boot mode is determined, please see the
-   :ref:`First Boot Documentation <boot-First_boot_determination>`.
+   :ref:`first boot documentation <First_boot_determination>`.
 
    .. raw:: html
 
@@ -362,15 +399,15 @@ this datasource using the GuestInfo keys transport:
 
       govc vm.power -off "${VM}"
 
-#. Export the environment variables that contain the ``cloud-init`` metadata
-   and user data:
+#. Export the environment variables that contain the ``cloud-init`` meta-data
+   and user-data:
 
    .. code-block:: shell
 
-      export METADATA=$(gzip -c9 <metadata.yaml | { base64 -w0 2>/dev/null || base64; }) \
-           USERDATA=$(gzip -c9 <userdata.yaml | { base64 -w0 2>/dev/null || base64; })
+      export METADATA=$(gzip -c9 <meta-data.yaml | { base64 -w0 2>/dev/null || base64; }) \
+           USERDATA=$(gzip -c9 <user-data.yaml | { base64 -w0 2>/dev/null || base64; })
 
-#. Assign the metadata and user data to the VM:
+#. Assign the meta-data and user-data to the VM:
 
    .. code-block:: shell
 
@@ -397,7 +434,7 @@ this datasource using the GuestInfo keys transport:
 
 If all went according to plan, the CentOS box is:
 
-* Locked down, allowing SSH access only for the user in the user data.
+* Locked down, allowing SSH access only for the user in the user-data.
 * Configured for a dynamic IP address via DHCP.
 * Has a hostname of ``cloud-vm``.
 
@@ -407,42 +444,42 @@ Examples of common configurations
 Setting the hostname
 --------------------
 
-The hostname is set by way of the metadata key ``local-hostname``.
+The hostname is set by way of the meta-data key ``local-hostname``.
 
 Setting the instance ID
 -----------------------
 
-The instance ID may be set by way of the metadata key ``instance-id``. However,
-if this value is absent then the instance ID is read from the file
+The instance ID may be set by way of the meta-data key ``instance-id``.
+However, if this value is absent then the instance ID is read from the file
 :file:`/sys/class/dmi/id/product_uuid`.
 
 Providing public SSH keys
 -------------------------
 
-The public SSH keys may be set by way of the metadata key ``public-keys-data``.
-Each newline-terminated string will be interpreted as a separate SSH public
-key, which will be placed in distro's default user's
+The public SSH keys may be set by way of the meta-data key
+``public-keys-data``. Each newline-terminated string will be interpreted as a
+separate SSH public key, which will be placed in distro's default user's
 :file:`~/.ssh/authorized_keys`. If the value is empty or absent, then nothing
 will be written to :file:`~/.ssh/authorized_keys`.
 
 Configuring the network
 -----------------------
 
-The network is configured by setting the metadata key ``network`` with a value
+The network is configured by setting the meta-data key ``network`` with a value
 consistent with Network Config :ref:`Version 1 <network_config_v1>` or
 :ref:`Version 2 <network_config_v2>`, depending on the Linux distro's version
 of ``cloud-init``.
 
-The metadata key ``network.encoding`` may be used to indicate the format of
-the metadata key ``network``. Valid encodings are ``base64`` and
+The meta-data key ``network.encoding`` may be used to indicate the format of
+the meta-data key ``network``. Valid encodings are ``base64`` and
 ``gzip+base64``.
 
 
 .. LINKS
 .. _Guest OS Customization: https://docs.vmware.com/en/VMware-vSphere/8.0/vsphere-vm-administration/GUID-58E346FF-83AE-42B8-BE58-253641D257BC.html
 .. _GuestInfo keys: https://github.com/vmware/govmomi/blob/master/govc/USAGE.md
-.. _traditional Linux customisation specification: https://docs.vmware.com/en/VMware-vSphere/8.0/vsphere-vm-administration/GUID-EB5F090E-723C-4470-B640-50B35D1EC016.html#GUID-9A5093A5-C54F-4502-941B-3F9C0F573A39__GUID-40C60643-A2EB-4B05-8927-B51AF7A6CC5E
-.. _Guest customisation using cloud-init: https://developer.vmware.com/docs/17020/vsphere-web-services-sdk-programming-guide--8-0-/GUID-75E27FA9-2E40-4CBF-BF3D-22DCFC8F11F7.html
+.. _traditional Linux customization specification: https://docs.vmware.com/en/VMware-vSphere/8.0/vsphere-vm-administration/GUID-EB5F090E-723C-4470-B640-50B35D1EC016.html#GUID-9A5093A5-C54F-4502-941B-3F9C0F573A39__GUID-40C60643-A2EB-4B05-8927-B51AF7A6CC5E
+.. _Guest customization using cloud-init: https://developer.vmware.com/docs/17686/vsphere-web-services-sdk-programming-guide--8-0-/GUID-75E27FA9-2E40-4CBF-BF3D-22DCFC8F11F7.html
 .. _VMware Tools: https://docs.vmware.com/en/VMware-Tools/index.html
 .. _customization configuration: https://github.com/canonical/cloud-init/blob/main/cloudinit/sources/helpers/vmware/imc/config.py
 .. _VMware vSphere Product Documentation: https://docs.vmware.com/en/VMware-vSphere/8.0/vsphere-vm-administration/GUID-EB5F090E-723C-4470-B640-50B35D1EC016.html#GUID-9A5093A5-C54F-4502-941B-3F9C0F573A39__GUID-40C60643-A2EB-4B05-8927-B51AF7A6CC5E

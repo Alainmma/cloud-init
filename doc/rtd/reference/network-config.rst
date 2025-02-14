@@ -16,7 +16,13 @@ precedence; each item overriding the previous.
 - **Kernel command line**: ``ip=`` or
   ``network-config=<Base64 encoded YAML config string>``
 
-User data cannot change an instance's network configuration. In the absence
+Cloud-init will write out the following files representing the network-config
+processed:
+
+- :file:`/run/cloud-init/network-config.json`: world-readable JSON containing
+  the selected source network-config JSON used by cloud-init network renderers.
+
+User-data cannot change an instance's network configuration. In the absence
 of network configuration in any of the above sources, ``cloud-init`` will
 write out a network configuration that will issue a DHCP request on a "first"
 network interface.
@@ -61,10 +67,10 @@ networking configuration.
 Disabling network activation
 ============================
 
-Some datasources may not be initialised until after the network has been
+Some datasources may not be initialized until after the network has been
 brought up. In this case, ``cloud-init`` will attempt to bring up the
-interfaces specified by the datasource metadata using a network activator
-discovered by `cloudinit.net.activators.select_activators`_.
+interfaces specified by the datasource meta-data using a network activator
+discovered by `cloudinit.net.activators.select_activator`_.
 
 This behaviour can be disabled in the ``cloud-init`` configuration dictionary,
 merged from :file:`/etc/cloud/cloud.cfg` and
@@ -119,46 +125,42 @@ The following datasources optionally provide network configuration:
 
 - :ref:`datasource_config_drive`
 
-  - `OpenStack Metadata Service Network`_
-  - :ref:`network_config_eni`
+  - `OpenStack Instance Metadata Service Network`_
 
 - :ref:`datasource_digital_ocean`
 
-  - `DigitalOcean JSON metadata`_
+  - `DigitalOcean JSON meta-data`_
+
+- :ref:`datasource_lxd`
+
+  - `LXD`_
 
 - :ref:`datasource_nocloud`
 
   - :ref:`network_config_v1`
   - :ref:`network_config_v2`
-  - :ref:`network_config_eni`
-
-- :ref:`datasource_opennebula`
-
-  - :ref:`network_config_eni`
 
 - :ref:`datasource_openstack`
 
-  - :ref:`network_config_eni`
-  - `OpenStack Metadata Service Network`_
+  - `OpenStack Instance Metadata Service Network`_
 
 - :ref:`datasource_smartos`
 
-  - `SmartOS JSON Metadata`_
+  - `SmartOS JSON Instance Metadata`_
 
 - :ref:`datasource_upcloud`
 
-  - `UpCloud JSON metadata`_
+  - `UpCloud JSON meta-data`_
 
 - :ref:`datasource_vultr`
 
-  - `Vultr JSON metadata`_
+  - `Vultr JSON meta-data`_
 
 For more information on network configuration formats:
 
 .. toctree::
    :maxdepth: 1
 
-   network-config-format-eni.rst
    network-config-format-v1.rst
    network-config-format-v2.rst
 
@@ -213,6 +215,11 @@ for BSD flavors at the moment.
 Network output policy
 =====================
 
+.. note::
+
+   These are **upstream** defaults and are known to be overridden by
+   downstream distributions.
+
 The default policy for selecting a network ``renderer`` (in order of
 preference) is as follows:
 
@@ -246,39 +253,46 @@ supplying an updated configuration in cloud-config. ::
 Network configuration tools
 ===========================
 
-``Cloud-init`` contains one tool used to test input/output conversion between
+``Cloud-init`` contains a command used to test input/output conversion between
 formats. The :file:`tools/net-convert.py` in the ``cloud-init`` source
-repository is helpful in examining expected output for a given input format.
+repository is helpful in examining expected output for a given input
+format. If running these commands from the cloud-init source directory,
+make sure to set the correct path ``PYTHON_PATH=.``
 
 CLI Interface:
 
 .. code-block:: shell-session
 
-   $ tools/net-convert.py --help
+   $ cloud-init devel net-convert --help
 
 Example output:
 
 .. code-block::
 
-   usage: net-convert.py [-h] --network-data PATH --kind
-                         {eni,network_data.json,yaml} -d PATH [-m name,mac]
-                         --output-kind {eni,netplan,sysconfig}
+   usage: /usr/bin/cloud-init devel net-convert [-h] -p PATH -k {eni,network_data.json,yaml,azure-imds,vmware-imc} -d PATH -D
+                                                  {alpine,arch,azurelinux,debian,ubuntu,freebsd,dragonfly,gentoo,cos,netbsd,openbsd,almalinux,amazon,centos,cloudlinux,eurolinux,fedora,mariner,miraclelinux,openmandriva,photon,rhel,rocky,virtuozzo,opensuse,sles,openEuler}
+                                                  [-m name,mac] [--debug] -O {eni,netplan,networkd,sysconfig,network-manager}
 
-   optional arguments:
+   options:
      -h, --help            show this help message and exit
-     --network-data PATH, -p PATH
-     --kind {eni,network_data.json,yaml}, -k {eni,network_data.json,yaml}
+     -p PATH, --network-data PATH
+                           The network configuration to read
+     -k {eni,network_data.json,yaml,azure-imds,vmware-imc}, --kind {eni,network_data.json,yaml,azure-imds,vmware-imc}
+                           The format of the given network config
      -d PATH, --directory PATH
                            directory to place output in
+     -D {alpine,arch,azurelinux,debian,ubuntu,freebsd,dragonfly,gentoo,cos,netbsd,openbsd,almalinux,amazon,centos,cloudlinux,eurolinux,fedora,mariner,miraclelinux,openmandriva,photon,rhel,rocky,virtuozzo,opensuse,sles,openeuler}, --distro {alpine,arch,azurelinux,debian,ubuntu,freebsd,dragonfly,gentoo,cos,netbsd,openbsd,almalinux,amazon,centos,cloudlinux,eurolinux,fedora,mariner,miraclelinux,openmandriva,photon,rhel,rocky,virtuozzo,opensuse,sles,openEuler}
      -m name,mac, --mac name,mac
                            interface name to mac mapping
-     --output-kind {eni,netplan,sysconfig}, -ok {eni,netplan,sysconfig}
+     --debug               enable debug logging to stderr.
+     -O {eni,netplan,networkd,sysconfig,network-manager}, --output-kind {eni,netplan,networkd,sysconfig,network-manager}
+                           The network config format to emit
 
 Example of converting V2 to sysconfig:
 
 .. code-block:: shell-session
 
-   $ tools/net-convert.py --network-data v2.yaml --kind yaml \
+   $ cloud-init devel net-convert --network-data v2.yaml --kind yaml \
       --output-kind sysconfig -d target
    $ cat target/etc/sysconfig/network-scripts/ifcfg-eth*
 
@@ -286,32 +300,30 @@ Example output:
 
 .. code-block::
 
-   # Created by cloud-init on instance boot automatically, do not edit.
+   # Created by cloud-init automatically, do not edit.
    #
    BOOTPROTO=static
    DEVICE=eth7
    IPADDR=192.168.1.5/255.255.255.0
-   NM_CONTROLLED=no
    ONBOOT=yes
    TYPE=Ethernet
    USERCTL=no
-   # Created by cloud-init on instance boot automatically, do not edit.
+   # Created by cloud-init automatically, do not edit.
    #
    BOOTPROTO=dhcp
    DEVICE=eth9
-   NM_CONTROLLED=no
    ONBOOT=yes
    TYPE=Ethernet
    USERCTL=no
 
 
-.. _Cloud-init: https://launchpad.net/cloud-init
+.. _LXD: https://documentation.ubuntu.com/lxd/en/latest/cloud-init/#how-to-specify-network-configuration-data
 .. _NetworkManager: https://networkmanager.dev
 .. _Netplan: https://netplan.io/
-.. _DigitalOcean JSON metadata: https://developers.digitalocean.com/documentation/metadata/
-.. _OpenStack Metadata Service Network: https://specs.openstack.org/openstack/nova-specs/specs/liberty/implemented/metadata-service-network-info.html
-.. _SmartOS JSON Metadata: https://eng.joyent.com/mdata/datadict.html
-.. _UpCloud JSON metadata: https://developers.upcloud.com/1.3/8-servers/#metadata-service
-.. _Vultr JSON metadata: https://www.vultr.com/metadata/
-.. _cloudinit.net.activators.select_activators: https://github.com/canonical/cloud-init/blob/main/cloudinit/net/activators.py#L279
-.. _FreeBSD.start_services: https://github.com/canonical/cloud-init/blob/main/cloudinit/net/freebsd.py#L28
+.. _DigitalOcean JSON meta-data: https://developers.digitalocean.com/documentation/metadata/
+.. _OpenStack Instance Metadata Service Network: https://specs.openstack.org/openstack/nova-specs/specs/liberty/implemented/metadata-service-network-info.html
+.. _SmartOS JSON Instance Metadata: https://eng.joyent.com/mdata/datadict.html
+.. _UpCloud JSON meta-data: https://developers.upcloud.com/1.3/8-servers/#metadata-service
+.. _Vultr JSON meta-data: https://www.vultr.com/metadata/
+.. _cloudinit.net.activators.select_activator: https://github.com/canonical/cloud-init/blob/main/cloudinit/net/activators.py#L249
+.. _FreeBSD.start_services: https://github.com/canonical/cloud-init/blob/main/cloudinit/net/freebsd.py#L46

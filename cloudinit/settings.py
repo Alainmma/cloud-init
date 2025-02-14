@@ -16,7 +16,7 @@ CLOUD_CONFIG = "/etc/cloud/cloud.cfg"
 
 CLEAN_RUNPARTS_DIR = "/etc/cloud/clean.d"
 
-RUN_CLOUD_CONFIG = "/run/cloud-init/cloud.cfg"
+DEFAULT_RUN_DIR = "/run/cloud-init"
 
 # What u get if no config is provided
 CFG_BUILTIN = {
@@ -28,6 +28,7 @@ CFG_BUILTIN = {
         "DigitalOcean",
         "Azure",
         "AltCloud",
+        "VMware",
         "OVF",
         "MAAS",
         "GCE",
@@ -46,8 +47,10 @@ CFG_BUILTIN = {
         "Exoscale",
         "RbxCloud",
         "UpCloud",
-        "VMware",
         "NWCS",
+        "Akamai",
+        "WSL",
+        "CloudCIX",
         # At the end to act as a 'catch' when none of the above work...
         "None",
     ],
@@ -57,6 +60,7 @@ CFG_BUILTIN = {
     "system_info": {
         "paths": {
             "cloud_dir": "/var/lib/cloud",
+            "docs_dir": "/usr/share/doc/cloud-init/",
             "templates_dir": "/etc/cloud/templates/",
         },
         "distro": "ubuntu",
@@ -74,4 +78,4 @@ PER_ONCE = "once"
 # Used to sanity check incoming handlers/modules frequencies
 FREQUENCIES = [PER_INSTANCE, PER_ALWAYS, PER_ONCE]
 
-# vi: ts=4 expandtab
+HOTPLUG_ENABLED_FILE = "/var/lib/cloud/hotplug.enabled"
